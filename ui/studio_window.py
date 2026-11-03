@@ -871,6 +871,34 @@ class StudioCockpitWindow:
             pady=10
         )
 
+        debrief_header = tk.Frame(self.ai_debrief_card, bg="#1c0e2c")
+        debrief_header.pack(fill="x", pady=(0, 6))
+
+        self.lbl_ai_model_badge = tk.Label(
+            debrief_header,
+            text="⚡ Model: Offline CPU",
+            font=("Helvetica", 8, "italic"),
+            fg=COLOR_CYAN,
+            bg="#1c0e2c"
+        )
+        self.lbl_ai_model_badge.pack(side="left")
+
+        btn_manage_ai = tk.Button(
+            debrief_header,
+            text="⚙️ Manage AI Models",
+            font=("Helvetica", 8, "bold"),
+            bg="#2a143f",
+            fg=COLOR_GOLD,
+            activebackground="#451f68",
+            activeforeground="#ffffff",
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=2,
+            command=self._open_manage_models_dialog
+        )
+        btn_manage_ai.pack(side="right")
+
         self.lbl_ai_debrief_text = tk.Label(
             self.ai_debrief_card,
             text="Take debriefing will appear here once take analysis completes.",
@@ -2332,6 +2360,8 @@ class StudioCockpitWindow:
     def _refresh_ai_coach_view(self):
         installed = self.offline_coach.get_installed_model()
         if installed:
+            if hasattr(self, "lbl_ai_model_badge"):
+                self.lbl_ai_model_badge.config(text=f"⚡ Model: {installed.get('name', 'Offline')}")
             self.ai_install_card.pack_forget()
             self.ai_debrief_card.pack(fill="x", pady=(8, 0))
             self.conversation_card.pack(fill="x", pady=(8, 0))
@@ -2339,10 +2369,162 @@ class StudioCockpitWindow:
             self.ai_debrief_card.pack_forget()
             self.conversation_card.pack_forget()
             self.ai_install_card.pack(fill="x", pady=(8, 0))
+            if hasattr(self, "lbl_ai_install_status"):
+                self.lbl_ai_install_status.config(text="Ready to install")
+            if hasattr(self, "prog_ai") and self.prog_ai.winfo_exists():
+                self.prog_ai.pack_forget()
 
         self.root.update_idletasks()
         if hasattr(self, "report_canvas"):
             self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
+
+    def _open_manage_models_dialog(self):
+        """Dedicated dialog to inspect and cleanly uninstall offline AI models (Option B)."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("⚙️ Manage Offline AI Models")
+        dlg.geometry("520x370")
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLOR_BG_MAIN)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Center dialog
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 260
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 185
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        # Title Header
+        hdr = tk.Frame(dlg, bg="#1e0f30", padx=16, pady=12)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr,
+            text="🤖 Offline AI Vocal Coach Manager",
+            font=("Helvetica", 12, "bold"),
+            fg=COLOR_GOLD,
+            bg="#1e0f30"
+        ).pack(anchor="w")
+        tk.Label(
+            hdr,
+            text="Manage local GGUF models for offline vocal analysis & Maestro Tiki debriefings.",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg="#1e0f30"
+        ).pack(anchor="w", pady=(2, 0))
+
+        content = tk.Frame(dlg, bg=COLOR_BG_MAIN, padx=16, pady=14)
+        content.pack(fill="both", expand=True)
+
+        installed = self.offline_coach.get_installed_model()
+        if installed:
+            card = tk.LabelFrame(
+                content,
+                text=" CURRENTLY ACTIVE MODEL ",
+                bg="#1a0d2a",
+                fg=COLOR_CYAN,
+                font=("Helvetica", 9, "bold"),
+                bd=1,
+                padx=12,
+                pady=10
+            )
+            card.pack(fill="x", pady=(0, 12))
+
+            tk.Label(
+                card,
+                text=installed.get("name", "Unknown Model"),
+                font=("Helvetica", 11, "bold"),
+                fg="#ffffff",
+                bg="#1a0d2a"
+            ).pack(anchor="w")
+
+            tk.Label(
+                card,
+                text=installed.get("tagline", ""),
+                font=("Helvetica", 8, "italic"),
+                fg=COLOR_TEXT_MUTED,
+                bg="#1a0d2a"
+            ).pack(anchor="w", pady=(2, 6))
+
+            p = installed.get("path")
+            size_mb = p.stat().st_size / (1024 * 1024) if p and p.exists() else 0
+            tk.Label(
+                card,
+                text=f"• Disk Footprint: {size_mb:.1f} MB  ({size_mb / 1024:.2f} GB)",
+                font=("Helvetica", 9),
+                fg=COLOR_LIME,
+                bg="#1a0d2a"
+            ).pack(anchor="w")
+
+            tk.Label(
+                card,
+                text=f"• Storage Location: {p.parent if p else self.offline_coach.models_dir}",
+                font=("Helvetica", 8),
+                fg=COLOR_TEXT_MUTED,
+                bg="#1a0d2a",
+                wraplength=460,
+                justify="left"
+            ).pack(anchor="w", pady=(2, 0))
+
+            # Action Frame
+            action_frame = tk.Frame(content, bg=COLOR_BG_MAIN)
+            action_frame.pack(fill="x", pady=8)
+
+            def _uninstall():
+                confirmed = messagebox.askyesno(
+                    "Confirm Model Removal",
+                    f"Are you sure you want to uninstall '{installed.get('name')}'?\n\n"
+                    f"This will free up ~{size_mb / 1024:.2f} GB of disk space and revert "
+                    f"the cockpit back to the optional download choice screen.",
+                    parent=dlg
+                )
+                if confirmed:
+                    self.offline_coach.uninstall_model()
+                    self._refresh_ai_coach_view()
+                    dlg.destroy()
+                    messagebox.showinfo(
+                        "Model Uninstalled",
+                        "Offline AI Model removed cleanly. Reverted to download choice screen.",
+                        parent=self.root
+                    )
+
+            btn_del = tk.Button(
+                action_frame,
+                text="🗑️ Uninstall Model & Revert to Choice Screen",
+                font=("Helvetica", 10, "bold"),
+                bg="#401018",
+                fg=COLOR_DANGER,
+                activebackground="#601824",
+                activeforeground="#ffffff",
+                bd=1,
+                relief="solid",
+                padx=12,
+                pady=6,
+                command=_uninstall
+            )
+            btn_del.pack(side="left")
+
+        else:
+            tk.Label(
+                content,
+                text="No offline AI models are currently installed.\n\nYou can download the 3B or 1.5B model anytime directly from the Rehearsal Cockpit.",
+                font=("Helvetica", 10),
+                fg=COLOR_TEXT_MUTED,
+                bg=COLOR_BG_MAIN,
+                justify="center"
+            ).pack(expand=True, pady=20)
+
+        # Close button at bottom
+        btn_close = tk.Button(
+            dlg,
+            text="Close",
+            font=("Helvetica", 9),
+            bg="#25123a",
+            fg=COLOR_TEXT_MAIN,
+            padx=16,
+            pady=4,
+            command=dlg.destroy
+        )
+        btn_close.pack(side="bottom", pady=10)
 
     def _on_download_ai_model(self):
         if self._is_downloading_model:
@@ -3202,6 +3384,9 @@ class StudioCockpitWindow:
                         fg=COLOR_CYAN
                     )
                 )
+                self.root.after_idle(
+                    lambda: self.lbl_status.config(text="Ready. Select a song or run calibration.")
+                )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -3264,6 +3449,9 @@ class StudioCockpitWindow:
                         bg="#351428",
                         fg=COLOR_MAGENTA
                     )
+                )
+                self.root.after_idle(
+                    lambda: self.lbl_status.config(text="Ready. Select a song or run calibration.")
                 )
 
         threading.Thread(target=_worker, daemon=True).start()

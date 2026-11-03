@@ -69,6 +69,9 @@ def read_wav_mono(wav_path: Path) -> Tuple[np.ndarray, int]:
         n_frames = wf.getnframes()
         raw_bytes = wf.readframes(n_frames)
 
+    if n_frames == 0 or len(raw_bytes) == 0:
+        raise ValueError("Audio recording is empty (0 frames recorded). Please verify your microphone is connected and selected as default.")
+
     if sampwidth == 2:
         dtype = np.int16
         scale = 32768.0
@@ -107,6 +110,9 @@ def extract_pitch_contour(
         times: 1D array of timestamps (seconds)
         pitches: 1D array of detected frequencies (Hz, 0.0 = unvoiced)
     """
+    if len(audio) < int(sr * 0.5):
+        raise ValueError("Audio signal is too short (less than 0.5 seconds). Please hold vocal sweep steadily.")
+
     frame_len = int(sr * (frame_size_ms / 1000.0))
     hop_len = int(sr * (hop_size_ms / 1000.0))
 

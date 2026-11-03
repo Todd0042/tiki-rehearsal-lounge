@@ -30,9 +30,11 @@ hiddenimports = [
     'PIL',
     'PIL._tkinter_finder',
     'winsound',
+    'sounddevice',
+    '_sounddevice_data',
 ]
 
-for pkg in ['yt_dlp', 'numpy', 'scipy', 'PIL']:
+for pkg in ['yt_dlp', 'numpy', 'scipy', 'PIL', 'sounddevice']:
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

@@ -19,10 +19,10 @@ import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 
-from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME
+from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME, STUDIO_CONFIG_DIR
 from audio.tone_generator import transpose_note, clamp_note_to_range, parse_target_notes
 
-MODELS_DIR = Path.home() / ".config" / "TikiRehearsalLounge" / "models"
+MODELS_DIR = STUDIO_CONFIG_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
@@ -76,6 +76,33 @@ class OfflineVocalCoach:
 
     def is_installed(self) -> bool:
         return self.get_installed_model() is not None
+
+    def uninstall_model(self, model_key: Optional[str] = None) -> bool:
+        """
+        Safely unloads LLM instance and removes downloaded model file(s) from disk.
+        If model_key is None, removes all installed models.
+        """
+        with self._load_lock:
+            self._llm = None
+            self._loaded_model_key = None
+
+            removed = False
+            targets = [AVAILABLE_MODELS[model_key]] if model_key and model_key in AVAILABLE_MODELS else AVAILABLE_MODELS.values()
+            for meta in targets:
+                p = self.models_dir / meta["filename"]
+                tmp_p = self.models_dir / f"{meta['filename']}.tmp"
+                if p.exists():
+                    try:
+                        p.unlink()
+                        removed = True
+                    except Exception as e:
+                        print(f"[OfflineVocalCoach] Failed to delete {p}: {e}", file=sys.stderr)
+                if tmp_p.exists():
+                    try:
+                        tmp_p.unlink()
+                    except Exception:
+                        pass
+            return removed
 
     def download_model(
         self,

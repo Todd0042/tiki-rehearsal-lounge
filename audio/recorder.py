@@ -35,6 +35,8 @@ class AudioRecorder:
 
         self._process: Optional[subprocess.Popen] = None
         self._record_thread: Optional[threading.Thread] = None
+        self._sd_stream = None
+        self._wav_file: Optional[wave.Wave_write] = None
         self._is_recording = False
         self._output_path: Optional[Path] = None
         self._start_time: float = 0.0
@@ -59,10 +61,58 @@ class AudioRecorder:
         self._is_recording = True
         self._start_time = time.time()
 
-        # Determine best available system recorder
+        # 1. Primary: Try native sounddevice (PortAudio/WASAPI/DirectSound/ALSA/Pulse)
+        try:
+            import sounddevice as sd
+            self._wav_file = wave.open(str(self._output_path), "wb")
+            self._wav_file.setnchannels(self.channels)
+            self._wav_file.setsampwidth(2)
+            self._wav_file.setframerate(self.sample_rate)
+
+            def _sd_callback(indata, frames, time_info, status):
+                if not self._is_recording:
+                    return
+                raw_bytes = indata.tobytes()
+                if self._wav_file:
+                    try:
+                        self._wav_file.writeframes(raw_bytes)
+                    except Exception:
+                        pass
+
+                rms, peak = 0.0, 0.0
+                if self.on_level:
+                    rms, peak = self._calculate_levels(raw_bytes)
+                    try:
+                        self.on_level(rms, peak)
+                    except Exception:
+                        pass
+
+                if self.on_pitch:
+                    self._process_live_pitch(raw_bytes, rms)
+
+            self._sd_stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="int16",
+                callback=_sd_callback,
+                blocksize=1024
+            )
+            self._sd_stream.start()
+            return True
+        except Exception as e:
+            # Sounddevice failed or not present; fall back to subprocess capture
+            if self._wav_file:
+                try:
+                    self._wav_file.close()
+                except Exception:
+                    pass
+                self._wav_file = None
+            self._sd_stream = None
+
+        # 2. Secondary: Subprocess-based capture (pw-record, ffmpeg, arecord)
         cmd = self._build_record_command()
         if not cmd:
-            print("[AudioRecorder] Error: No suitable audio capture tool found (pw-record, ffmpeg, or arecord).", file=sys.stderr)
+            print("[AudioRecorder] Error: No suitable audio capture tool found (sounddevice, pw-record, ffmpeg, or arecord).", file=sys.stderr)
             self._is_recording = False
             return False
 
@@ -95,6 +145,23 @@ class AudioRecorder:
 
         self._is_recording = False
 
+        # Stop sounddevice stream if active
+        if self._sd_stream:
+            try:
+                self._sd_stream.stop()
+                self._sd_stream.close()
+            except Exception:
+                pass
+            self._sd_stream = None
+
+        if self._wav_file:
+            try:
+                self._wav_file.close()
+            except Exception:
+                pass
+            self._wav_file = None
+
+        # Terminate subprocess if active
         if self._process:
             try:
                 self._process.terminate()
@@ -115,6 +182,11 @@ class AudioRecorder:
                 self.on_level(0.0, 0.0)
             except Exception:
                 pass
+        if self.on_pitch:
+            try:
+                self.on_pitch(0.0)
+            except Exception:
+                pass
 
         if self._output_path and self._output_path.exists() and self._output_path.stat().st_size > 44:
             return self._output_path
@@ -125,14 +197,14 @@ class AudioRecorder:
         from config import get_bundled_binary_path
         ffmpeg_bin = get_bundled_binary_path("ffmpeg") or shutil.which("ffmpeg")
 
-        # 1. Windows: Native WASAPI capture via bundled/system FFmpeg
+        # 1. Windows: FFmpeg DirectShow default audio capture
         if sys.platform == "win32" and ffmpeg_bin:
             return [
                 str(ffmpeg_bin),
                 "-hide_banner",
                 "-loglevel", "quiet",
-                "-f", "wasapi",
-                "-i", "default",
+                "-f", "dshow",
+                "-i", "audio=default",
                 "-ac", str(self.channels),
                 "-ar", str(self.sample_rate),
                 "-f", "s16le",
@@ -206,32 +278,7 @@ class AudioRecorder:
 
                     # Compute live pitch if listener is registered
                     if self.on_pitch:
-                        if rms < 0.02:
-                            try:
-                                self.on_pitch(0.0)
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                import numpy as np
-                                shorts = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
-                                # Quick autocorrelation
-                                corr = np.correlate(shorts, shorts, mode="full")
-                                corr = corr[len(shorts) - 1 :]
-                                if corr[0] > 1e-5:
-                                    norm_corr = corr / corr[0]
-                                    min_lag = int(self.sample_rate / 650.0)  # max 650 Hz
-                                    max_lag = int(self.sample_rate / 65.0)   # min 65 Hz
-                                    max_lag = min(max_lag, len(norm_corr) - 2)
-                                    if min_lag < max_lag:
-                                        peak_idx = np.argmax(norm_corr[min_lag:max_lag]) + min_lag
-                                        if norm_corr[peak_idx] >= 0.35:
-                                            hz = float(self.sample_rate / peak_idx)
-                                            self.on_pitch(hz)
-                                        else:
-                                            self.on_pitch(0.0)
-                            except Exception:
-                                pass
+                        self._process_live_pitch(raw_data, rms)
         except Exception as e:
             print(f"[AudioRecorder] Capture worker exception: {e}", file=sys.stderr)
         finally:
@@ -245,6 +292,37 @@ class AudioRecorder:
                     self.on_pitch(0.0)
                 except Exception:
                     pass
+
+    def _process_live_pitch(self, raw_data: bytes, rms: float):
+        """Extracts instant fundamental frequency (F0) from 16-bit PCM chunk via autocorrelation."""
+        if not self.on_pitch:
+            return
+        if rms < 0.02:
+            try:
+                self.on_pitch(0.0)
+            except Exception:
+                pass
+            return
+
+        try:
+            import numpy as np
+            shorts = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+            corr = np.correlate(shorts, shorts, mode="full")
+            corr = corr[len(shorts) - 1 :]
+            if corr[0] > 1e-5:
+                norm_corr = corr / corr[0]
+                min_lag = int(self.sample_rate / 650.0)  # max 650 Hz
+                max_lag = int(self.sample_rate / 65.0)   # min 65 Hz
+                max_lag = min(max_lag, len(norm_corr) - 2)
+                if min_lag < max_lag:
+                    peak_idx = int(np.argmax(norm_corr[min_lag:max_lag]) + min_lag)
+                    if norm_corr[peak_idx] >= 0.35:
+                        hz = float(self.sample_rate / peak_idx)
+                        self.on_pitch(hz)
+                    else:
+                        self.on_pitch(0.0)
+        except Exception:
+            pass
 
     @staticmethod
     def _calculate_levels(raw_bytes: bytes) -> tuple[float, float]:
