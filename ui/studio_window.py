@@ -78,6 +78,7 @@ class StudioCockpitWindow:
         self.current_take_wav: Optional[Path] = None
         self.is_rehearsing: bool = False
         self.is_calibrating: bool = False
+        self._calib_stop_requested: bool = False
 
         # Build UI
         self._setup_styles()
@@ -627,7 +628,7 @@ class StudioCockpitWindow:
         # Step 1: Siren Pitch Sweep
         card_ex1 = tk.LabelFrame(
             ex_row,
-            text=" STEP 1: SIREN GLIDE ('Ooo ➔ Aaa') ",
+            text=" STEP 1: SIREN GLIDE ('Ooo ➔ Aaa') — 15 SECONDS ",
             bg=COLOR_BG_CARD,
             fg=COLOR_CYAN,
             font=("Helvetica", 10, "bold"),
@@ -637,19 +638,27 @@ class StudioCockpitWindow:
         )
         card_ex1.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
+        desc_ex1 = (
+            "🎯 How to perform:\n"
+            "1. Take a full, relaxed breath from your diaphragm.\n"
+            "2. Start at your lowest comfortable, chest-resonant pitch on a round 'Oooo'.\n"
+            "3. Slowly and smoothly glide upward like a siren to your highest head/falsetto ceiling, opening to an 'Aaaa' at the top.\n"
+            "4. Hold the peak note briefly (1–2s), then smoothly glide all the way back down to your lowest note.\n\n"
+            "💡 Tip: Moderate volume only—do not shout or strain. We are mapping your natural boundaries."
+        )
         tk.Label(
             card_ex1,
-            text="Sing a smooth siren glide from your lowest comfortable pitch up to your highest ceiling note and back down.",
+            text=desc_ex1,
             font=("Helvetica", 9),
             fg=COLOR_TEXT_MUTED,
             bg=COLOR_BG_CARD,
-            wraplength=420,
+            wraplength=440,
             justify="left"
         ).pack(anchor="w", pady=(0, 12))
 
         self.btn_run_ex1 = tk.Button(
             card_ex1,
-            text="🎙️ Record Siren Sweep (7s)",
+            text="🎙️ Record Siren Sweep (15s)",
             bg="#2a1640",
             fg=COLOR_CYAN,
             font=("Helvetica", 10, "bold"),
@@ -662,7 +671,7 @@ class StudioCockpitWindow:
         # Step 2: Speaking Anchor
         card_ex2 = tk.LabelFrame(
             ex_row,
-            text=" STEP 2: SPEAKING ANCHOR ('20 ➔ 0') ",
+            text=" STEP 2: SPEAKING ANCHOR ('20 ➔ 0') — 25 SECONDS ",
             bg=COLOR_BG_CARD,
             fg=COLOR_MAGENTA,
             font=("Helvetica", 10, "bold"),
@@ -672,19 +681,25 @@ class StudioCockpitWindow:
         )
         card_ex2.pack(side="right", fill="both", expand=True, padx=(8, 0))
 
+        desc_ex2 = (
+            "🎯 How to perform:\n"
+            "1. Count backwards aloud from 20 down to 0 at an unhurried, natural pace (~1s per number: 'Twenty... Nineteen... Eighteen...').\n"
+            "2. Speak naturally, exactly as if talking casually to a friend across a table.\n\n"
+            "⚠️ Important: Do NOT sing or monotone chant. We need your authentic everyday conversational speaking pitch to calculate your Power Tessitura Sweet Spot."
+        )
         tk.Label(
             card_ex2,
-            text="Speak aloud counting backwards from 20 to 0 in your natural conversational speaking voice to establish pitch anchor.",
+            text=desc_ex2,
             font=("Helvetica", 9),
             fg=COLOR_TEXT_MUTED,
             bg=COLOR_BG_CARD,
-            wraplength=420,
+            wraplength=440,
             justify="left"
         ).pack(anchor="w", pady=(0, 12))
 
         self.btn_run_ex2 = tk.Button(
             card_ex2,
-            text="🗣️ Record Speaking Anchor (8s)",
+            text="🗣️ Record Speaking Anchor (25s)",
             bg="#351428",
             fg=COLOR_MAGENTA,
             font=("Helvetica", 10, "bold"),
@@ -934,14 +949,40 @@ class StudioCockpitWindow:
         self.root.after_idle(_update)
 
     def _on_record_siren_sweep(self):
+        if self.is_calibrating:
+            # User clicked early stop
+            self._calib_stop_requested = True
+            return
+
+        self.is_calibrating = True
+        self._calib_stop_requested = False
         take_path = TEMP_TAKES_DIR / "calib_siren.wav"
         self.recorder.start_recording(take_path)
-        self.btn_run_ex1.config(text="Singing Siren Glide... (7s)", bg=COLOR_GOLD)
-        self.lbl_status.config(text="Recording Siren Pitch Sweep (Ooo ➔ Aaa)...")
 
-        def _finish():
-            time.sleep(7.0)
+        total_secs = 15
+
+        def _worker():
+            for remaining in range(total_secs, 0, -1):
+                if self._calib_stop_requested:
+                    break
+                self.root.after_idle(
+                    lambda r=remaining: self.btn_run_ex1.config(
+                        text=f"Singing Siren... ({r}s) [Click to Finish Early]",
+                        bg=COLOR_GOLD,
+                        fg="#000000"
+                    )
+                )
+                self.root.after_idle(
+                    lambda r=remaining: self.lbl_status.config(
+                        text=f"Recording Siren Glide (floor ➔ ceiling ➔ floor)... {r}s remaining"
+                    )
+                )
+                time.sleep(1.0)
+
             self.recorder.stop_recording()
+            self.is_calibrating = False
+            self.root.after_idle(lambda: self.lbl_status.config(text="Analyzing siren sweep pitch contour..."))
+
             try:
                 res = self.calibrator.analyze_siren_sweep(take_path)
                 msg = (
@@ -956,19 +997,51 @@ class StudioCockpitWindow:
             except Exception as e:
                 self.root.after_idle(lambda: messagebox.showerror("Calibration Notice", str(e)))
             finally:
-                self.root.after_idle(lambda: self.btn_run_ex1.config(text="🎙️ Record Siren Sweep (7s)", bg="#2a1640"))
+                self.root.after_idle(
+                    lambda: self.btn_run_ex1.config(
+                        text="🎙️ Record Siren Sweep (15s)",
+                        bg="#2a1640",
+                        fg=COLOR_CYAN
+                    )
+                )
 
-        threading.Thread(target=_finish, daemon=True).start()
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_record_speaking_anchor(self):
+        if self.is_calibrating:
+            # User clicked early stop
+            self._calib_stop_requested = True
+            return
+
+        self.is_calibrating = True
+        self._calib_stop_requested = False
         take_path = TEMP_TAKES_DIR / "calib_speaking.wav"
         self.recorder.start_recording(take_path)
-        self.btn_run_ex2.config(text="Counting 20 ➔ 0... (8s)", bg=COLOR_GOLD)
-        self.lbl_status.config(text="Recording Speaking Pitch Anchor...")
 
-        def _finish():
-            time.sleep(8.0)
+        total_secs = 25
+
+        def _worker():
+            for remaining in range(total_secs, 0, -1):
+                if self._calib_stop_requested:
+                    break
+                self.root.after_idle(
+                    lambda r=remaining: self.btn_run_ex2.config(
+                        text=f"Counting 20➔0... ({r}s) [Click to Finish Early]",
+                        bg=COLOR_GOLD,
+                        fg="#000000"
+                    )
+                )
+                self.root.after_idle(
+                    lambda r=remaining: self.lbl_status.config(
+                        text=f"Recording Speaking Pitch Anchor (count 20 to 0)... {r}s remaining"
+                    )
+                )
+                time.sleep(1.0)
+
             self.recorder.stop_recording()
+            self.is_calibrating = False
+            self.root.after_idle(lambda: self.lbl_status.config(text="Analyzing speaking pitch anchor..."))
+
             try:
                 res = self.calibrator.analyze_speaking_anchor(take_path)
                 msg = (
@@ -983,9 +1056,15 @@ class StudioCockpitWindow:
             except Exception as e:
                 self.root.after_idle(lambda: messagebox.showerror("Anchor Notice", str(e)))
             finally:
-                self.root.after_idle(lambda: self.btn_run_ex2.config(text="🗣️ Record Speaking Anchor (8s)", bg="#351428"))
+                self.root.after_idle(
+                    lambda: self.btn_run_ex2.config(
+                        text="🗣️ Record Speaking Anchor (25s)",
+                        bg="#351428",
+                        fg=COLOR_MAGENTA
+                    )
+                )
 
-        threading.Thread(target=_finish, daemon=True).start()
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _refresh_profile_display(self):
         if not self.vocal_profile:

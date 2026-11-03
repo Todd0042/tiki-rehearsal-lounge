@@ -81,8 +81,8 @@ def run_cli_cockpit():
 
         print(f"{CYAN}--- Cockpit Menu ---{RESET}")
         print(f"  [1] 🔍 Search & Select Rehearsal Track  (Current: {BOLD}{track_name}{RESET})")
-        print(f"  [2] 🎙️ Run Exercise 1: Siren Pitch Sweep ('Ooo ➔ Aaa')")
-        print(f"  [3] 🗣️ Run Exercise 2: Speaking Anchor ('Count 20 ➔ 0')")
+        print(f"  [2] 🎙️ Run Exercise 1: Siren Pitch Sweep ('Ooo ➔ Aaa') (15s)")
+        print(f"  [3] 🗣️ Run Exercise 2: Speaking Anchor ('Count 20 ➔ 0') (25s)")
         print(f"  [4] 🎹 Adjust Key Shift [-3, +3]       (Current: {BOLD}{key_name}{RESET})")
         print(f"  [5] ✨ Smart Key Auto-Match for Selected Song")
         print(f"  [6] 🎤 Start Rehearsal Take & Performance Report")
@@ -113,20 +113,51 @@ def run_cli_cockpit():
 
         elif choice == "2":
             take_path = TEMP_TAKES_DIR / "cli_calib_siren.wav"
-            print(f"\n{CYAN}Get ready! Sing a smooth siren glide from your lowest note up to your highest ceiling note and back down.{RESET}")
-            print("Recording in 3 seconds...")
-            time.sleep(3)
-            print(f"{LIME}● RECORDING (7 seconds)... Sing now!{RESET}")
+            print(f"\n{CYAN}{BOLD}--- STEP 1: SIREN PITCH SWEEP ('Ooo ➔ Aaa') [15 Seconds] ---{RESET}")
+            print(f"{GOLD}🎯 How to perform:{RESET}")
+            print("  1. Take a full, relaxed breath from your diaphragm.")
+            print("  2. Start at your lowest comfortable, chest-resonant pitch on a round 'Oooo'.")
+            print("  3. Slowly glide upward like a siren to your highest head/falsetto ceiling, opening to 'Aaaa'.")
+            print("  4. Hold the peak note briefly (1–2s), then smoothly glide all the way back down to your lowest note.")
+            print(f"  • {BOLD}Tip:{RESET} Moderate volume only—do not shout or strain. We are mapping your true vocal boundaries.")
+            print(f"  • {BOLD}Early Stop:{RESET} If you complete your glide early, simply press [Enter] to analyze immediately.\n")
+
+            input(f"{BOLD}Press [Enter] when ready to begin 3-second countdown...{RESET}")
+            for c in range(3, 0, -1):
+                print(f"  Starting in {c}...", end="\r", flush=True)
+                time.sleep(1.0)
+
+            print(f"\n{LIME}● RECORDING (15s max)... Glide floor ➔ ceiling ➔ floor now!{RESET}")
             recorder.start_recording(take_path)
-            time.sleep(7.0)
+
+            import threading
+            stop_early_event = threading.Event()
+
+            def _wait_for_enter():
+                try:
+                    sys.stdin.readline()
+                    stop_early_event.set()
+                except Exception:
+                    pass
+
+            listener = threading.Thread(target=_wait_for_enter, daemon=True)
+            listener.start()
+
+            for remaining in range(15, 0, -1):
+                if stop_early_event.is_set():
+                    print(f"  {GOLD}[Finished early at {15 - remaining}s]{RESET}       ")
+                    break
+                print(f"  [{remaining:02d}s remaining] Sing siren glide... (Press Enter if done)  ", end="\r", flush=True)
+                time.sleep(1.0)
+
             recorder.stop_recording()
-            print("Analyzing siren sweep pitch contour...")
+            print(f"\n{CYAN}Analyzing siren sweep pitch contour...{RESET}")
             try:
                 res = calibrator.analyze_siren_sweep(take_path)
-                print(f"\n{LIME}Siren Sweep Results:{RESET}")
+                print(f"\n{LIME}{BOLD}Siren Sweep Results:{RESET}")
                 print(f"  • Vocal Floor:   {res['min_note']} ({res['min_hz']:.1f} Hz)")
                 print(f"  • Vocal Ceiling: {res['max_note']} ({res['max_hz']:.1f} Hz)")
-                print(f"  • Span:          {res['range_semitones']:.1f} semitones")
+                print(f"  • Usable Span:   {res['range_semitones']:.1f} semitones")
                 profile = calibrator.load_profile()
                 analyzer.update_profile(profile)
             except Exception as e:
@@ -134,20 +165,49 @@ def run_cli_cockpit():
 
         elif choice == "3":
             take_path = TEMP_TAKES_DIR / "cli_calib_speaking.wav"
-            print(f"\n{CYAN}Get ready! Count backwards from 20 to 0 in your natural conversational voice.{RESET}")
-            print("Recording in 3 seconds...")
-            time.sleep(3)
-            print(f"{LIME}● RECORDING (8 seconds)... Count aloud now!{RESET}")
+            print(f"\n{MAGENTA}{BOLD}--- STEP 2: SPEAKING PITCH ANCHOR ('20 ➔ 0') [25 Seconds] ---{RESET}")
+            print(f"{GOLD}🎯 How to perform:{RESET}")
+            print("  1. Count backwards aloud from 20 down to 0 at an unhurried, natural pace (~1s per number: 'Twenty... Nineteen... Eighteen...').")
+            print("  2. Speak naturally, exactly as if talking casually to a friend across a table.")
+            print(f"  • {BOLD}Important:{RESET} Do NOT sing or monotone chant. We need your authentic everyday conversational speaking pitch.")
+            print(f"  • {BOLD}Early Stop:{RESET} If you reach zero early, press [Enter] to analyze immediately.\n")
+
+            input(f"{BOLD}Press [Enter] when ready to begin 3-second countdown...{RESET}")
+            for c in range(3, 0, -1):
+                print(f"  Starting in {c}...", end="\r", flush=True)
+                time.sleep(1.0)
+
+            print(f"\n{LIME}● RECORDING (25s max)... Count backwards from 20 to 0 now!{RESET}")
             recorder.start_recording(take_path)
-            time.sleep(8.0)
+
+            import threading
+            stop_early_event = threading.Event()
+
+            def _wait_for_enter_spk():
+                try:
+                    sys.stdin.readline()
+                    stop_early_event.set()
+                except Exception:
+                    pass
+
+            listener = threading.Thread(target=_wait_for_enter_spk, daemon=True)
+            listener.start()
+
+            for remaining in range(25, 0, -1):
+                if stop_early_event.is_set():
+                    print(f"  {GOLD}[Finished early at {25 - remaining}s]{RESET}       ")
+                    break
+                print(f"  [{remaining:02d}s remaining] Counting backwards... (Press Enter if done)  ", end="\r", flush=True)
+                time.sleep(1.0)
+
             recorder.stop_recording()
-            print("Analyzing speaking fundamental...")
+            print(f"\n{CYAN}Analyzing speaking fundamental...{RESET}")
             try:
                 res = calibrator.analyze_speaking_anchor(take_path)
-                print(f"\n{LIME}Speaking Anchor Results:{RESET}")
-                print(f"  • Speaking Pitch: {res['anchor_note']} ({res['anchor_hz']:.1f} Hz)")
-                print(f"  • Power Sweet Spot: {res['tessitura_min_note']} to {res['tessitura_max_note']}")
-                print(f"  • Voice Category: {res['vocal_type']}")
+                print(f"\n{LIME}{BOLD}Speaking Anchor Results:{RESET}")
+                print(f"  • Speaking Pitch:   {res['anchor_note']} ({res['anchor_hz']:.1f} Hz)")
+                print(f"  • Power Sweet Spot: {LIME}{res['tessitura_min_note']} to {res['tessitura_max_note']}{RESET}")
+                print(f"  • Voice Category:   {res['vocal_type']}")
                 profile = calibrator.load_profile()
                 analyzer.update_profile(profile)
             except Exception as e:
