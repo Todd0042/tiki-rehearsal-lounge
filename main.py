@@ -272,6 +272,18 @@ def run_cli_cockpit():
             print(f"  • Vocal Resonance:    {report.resonance_verdict} (ratio: {report.singers_formant_ratio:.3f})")
             print(f"  • Breath Support:     {report.breath_support_pct:.1f}% ({report.breath_support_verdict})")
             print(f"  • Glottal Attacks:    {report.onset_attack_verdict} ({report.balanced_onsets_pct:.1f}% balanced)")
+            print(f"  • Energy Steadiness:  {report.energy_steadiness_pct:.1f}% ({report.dynamics_verdict})")
+            print(f"  • Sibilance Friction: {report.sibilance_verdict} (ratio: {report.sibilance_ratio:.3f})")
+            print(f"  • Phonation Fry:      {report.vocal_fry_pct:.1f}% ({report.vocal_fry_verdict})")
+            if report.phrase_highlights:
+                print(f"  • {LIME}Song Highlights (Timestamped):{RESET}")
+                for h in report.phrase_highlights:
+                    print(f"    - [{h['timestamp']}] ({h['note_span']}): {h['detail']}")
+            if report.phrase_struggles:
+                print(f"  • {MAGENTA}Focus & Struggle Moments (Timestamped):{RESET}")
+                for s in report.phrase_struggles:
+                    cue_txt = f" [Cue: {s['cue']}]" if s.get('cue') else ""
+                    print(f"    - [{s['timestamp']}] ({s['note_span']}): {s['detail']}{cue_txt}")
             print(f"  • Coach Feedback:")
             for note in report.coach_feedback:
                 print(f"    - {note}")

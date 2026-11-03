@@ -55,6 +55,7 @@ from audio.calibration import (
 from audio.player import RehearsalPlayer
 from audio.vocal_analyzer import VocalTakeAnalyzer, TakeAnalysisReport
 from downloader import TrackDownloader
+from ai.offline_coach import OfflineVocalCoach, AVAILABLE_MODELS
 
 
 class StudioCockpitWindow:
@@ -79,6 +80,16 @@ class StudioCockpitWindow:
         )
         self.player = RehearsalPlayer(on_finished=self._on_playback_ended)
         self.downloader = TrackDownloader(db_bridge=self.db)
+
+        # Offline AI Vocal Coach Engine
+        self.offline_coach = OfflineVocalCoach()
+        self.chat_history: List[Dict[str, str]] = []
+        self._last_take_report: Optional[TakeAnalysisReport] = None
+        self._is_ai_generating: bool = False
+        self._selected_model_key: str = "3b"
+        self._is_downloading_model: bool = False
+        self._download_cancel_event: Optional[threading.Event] = None
+        self._drawer_expanded: bool = False
 
         # Session State
         self.selected_track: Optional[Dict[str, Any]] = None
@@ -345,12 +356,41 @@ class StudioCockpitWindow:
         )
         self.btn_record_take.pack(fill="x", pady=(0, 8))
 
+        # Multi-Stage Analysis Progress Bar (Shown during DSP analysis)
+        self.analysis_prog_frame = tk.Frame(transport_card, bg="#1a0c28", bd=1, relief="solid", padx=10, pady=8)
+        self.lbl_analysis_title = tk.Label(
+            self.analysis_prog_frame,
+            text="🔬 ANALYZING VOCAL PERFORMANCE...",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_CYAN,
+            bg="#1a0c28"
+        )
+        self.lbl_analysis_title.pack(anchor="w")
+
+        self.analysis_prog_bar = ttk.Progressbar(
+            self.analysis_prog_frame,
+            orient="horizontal",
+            mode="determinate"
+        )
+        self.analysis_prog_bar.pack(fill="x", pady=(4, 4))
+
+        self.lbl_analysis_step = tk.Label(
+            self.analysis_prog_frame,
+            text="Initializing acoustic DSP engine...",
+            font=("Helvetica", 8),
+            fg=COLOR_GOLD,
+            bg="#1a0c28",
+            wraplength=320,
+            justify="left"
+        )
+        self.lbl_analysis_step.pack(anchor="w")
+
         # Live VU Meter
-        vu_row = tk.Frame(transport_card, bg=COLOR_BG_CARD)
-        vu_row.pack(fill="x", pady=4)
+        self.vu_row = tk.Frame(transport_card, bg=COLOR_BG_CARD)
+        self.vu_row.pack(fill="x", pady=4)
 
         tk.Label(
-            vu_row,
+            self.vu_row,
             text="MIC VU:",
             font=("Helvetica", 8, "bold"),
             fg=COLOR_TEXT_MUTED,
@@ -358,7 +398,7 @@ class StudioCockpitWindow:
         ).pack(side="left")
 
         self.vu_canvas = tk.Canvas(
-            vu_row,
+            self.vu_row,
             bg="#0d0814",
             height=14,
             bd=0,
@@ -418,8 +458,39 @@ class StudioCockpitWindow:
         self._build_report_card_view(self.report_frame)
 
     def _build_report_card_view(self, parent: tk.LabelFrame):
+        # Responsive Scrollable Canvas Container
+        self.report_canvas = tk.Canvas(parent, bg=COLOR_BG_CARD, bd=0, highlightthickness=0)
+        self.report_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.report_canvas.yview)
+        scroll_content = tk.Frame(self.report_canvas, bg=COLOR_BG_CARD)
+
+        scroll_content.bind(
+            "<Configure>",
+            lambda e: self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
+        )
+        canvas_win = self.report_canvas.create_window((0, 0), window=scroll_content, anchor="nw")
+
+        def _on_canvas_configure(e):
+            self.report_canvas.itemconfig(canvas_win, width=e.width)
+
+        self.report_canvas.bind("<Configure>", _on_canvas_configure)
+        self.report_canvas.configure(yscrollcommand=self.report_scrollbar.set)
+
+        def _on_mousewheel(event):
+            if not hasattr(self, "report_canvas") or not self.report_canvas.winfo_exists():
+                return
+            if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
+                self.report_canvas.yview_scroll(-2, "units")
+            elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
+                self.report_canvas.yview_scroll(2, "units")
+
+        self.report_canvas.bind("<Enter>", lambda e: self.report_canvas.bind_all("<Button-4>", _on_mousewheel) or self.report_canvas.bind_all("<Button-5>", _on_mousewheel) or self.report_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self.report_canvas.bind("<Leave>", lambda e: self.report_canvas.unbind_all("<Button-4>") or self.report_canvas.unbind_all("<Button-5>") or self.report_canvas.unbind_all("<MouseWheel>"))
+
+        self.report_canvas.pack(side="left", fill="both", expand=True)
+        self.report_scrollbar.pack(side="right", fill="y")
+
         # Score Banner
-        self.score_banner = tk.Frame(parent, bg=COLOR_BG_CARD)
+        self.score_banner = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
         self.score_banner.pack(fill="x", pady=(0, 16))
 
         self.lbl_score_num = tk.Label(
@@ -453,7 +524,7 @@ class StudioCockpitWindow:
         self.lbl_score_sub.pack(anchor="w")
 
         # Metric Tiles Grid
-        grid_frame = tk.Frame(parent, bg=COLOR_BG_CARD)
+        grid_frame = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
         grid_frame.pack(fill="x", pady=(0, 16))
 
         # Tile 1: Pitch Accuracy
@@ -483,9 +554,46 @@ class StudioCockpitWindow:
         grid_frame.columnconfigure(0, weight=1)
         grid_frame.columnconfigure(1, weight=1)
 
+        # Expandable Acoustic Timbre & Dynamics Breakdown Drawer
+        self.drawer_container = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
+        self.drawer_container.pack(fill="x", pady=(0, 12))
+
+        self.btn_toggle_drawer = tk.Button(
+            self.drawer_container,
+            text="▶ Acoustic Timbre & Dynamics Breakdown (Click to Expand)",
+            font=("Helvetica", 8, "bold"),
+            bg="#1d1228",
+            fg=COLOR_CYAN,
+            bd=1,
+            relief="solid",
+            pady=4,
+            command=self._on_toggle_drawer
+        )
+        self.btn_toggle_drawer.pack(fill="x")
+
+        self.drawer_subcards = tk.Frame(self.drawer_container, bg="#130a1c", bd=1, relief="solid", padx=10, pady=8)
+
+        row_dyn = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_dyn.pack(fill="x", pady=2)
+        tk.Label(row_dyn, text="⚡ Energy Steadiness & Compression:", font=("Helvetica", 8, "bold"), fg=COLOR_GOLD, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_dyn = tk.Label(row_dyn, text="-- % (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_dyn.pack(side="left", padx=8)
+
+        row_sib = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_sib.pack(fill="x", pady=2)
+        tk.Label(row_sib, text="🗣️ Consonant Crispness & Sibilance (5-8kHz):", font=("Helvetica", 8, "bold"), fg=COLOR_CYAN, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_sib = tk.Label(row_sib, text="-- (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_sib.pack(side="left", padx=8)
+
+        row_fry = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_fry.pack(fill="x", pady=2)
+        tk.Label(row_fry, text="🌊 Vocal Fry & Phonation Creak:", font=("Helvetica", 8, "bold"), fg=COLOR_MAGENTA, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_fry = tk.Label(row_fry, text="-- % (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_fry.pack(side="left", padx=8)
+
         # Coach Notes
         self.notes_frame = tk.LabelFrame(
-            parent,
+            scroll_content,
             text=" COACH FEEDBACK ",
             bg="#140b20",
             fg=COLOR_GOLD,
@@ -494,10 +602,10 @@ class StudioCockpitWindow:
             padx=14,
             pady=12
         )
-        self.notes_frame.pack(fill="both", expand=True, pady=(0, 12))
+        self.notes_frame.pack(fill="x", pady=(0, 12))
 
         self.coach_feedback_container = tk.Frame(self.notes_frame, bg="#140b20")
-        self.coach_feedback_container.pack(fill="both", expand=True)
+        self.coach_feedback_container.pack(fill="x")
 
         self.lbl_coach_empty = tk.Label(
             self.coach_feedback_container,
@@ -510,14 +618,230 @@ class StudioCockpitWindow:
         )
         self.lbl_coach_empty.pack(fill="x", padx=4, pady=6)
 
+        # ---------------------------------------------------------
+        # AI COACH CONTAINER (Installer, Debrief, and Conversation)
+        # ---------------------------------------------------------
+        self.ai_container = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
+        self.ai_container.pack(fill="x", pady=(0, 16))
+
+        # A. Optional Installer Card (Shown if model not installed)
+        self.ai_install_card = tk.LabelFrame(
+            self.ai_container,
+            text=" 🤖 OFFLINE AI VOCAL COACH (OPTIONAL MODULE) ",
+            bg="#1d0f2b",
+            fg=COLOR_CYAN,
+            font=("Helvetica", 9, "bold"),
+            bd=1,
+            padx=12,
+            pady=10
+        )
+
+        tk.Label(
+            self.ai_install_card,
+            text="Enable in-depth multi-paragraph vocal diagnostics and interactive conversation.\n"
+                 "100% offline • Zero accounts • Zero API keys • Completely private.",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MAIN,
+            bg="#1d0f2b",
+            justify="left"
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.model_choice_var = tk.StringVar(value="3b")
+        opt_frame = tk.Frame(self.ai_install_card, bg="#1d0f2b")
+        opt_frame.pack(fill="x", pady=(0, 8))
+
+        rb1 = tk.Radiobutton(
+            opt_frame,
+            text="Qwen 2.5 3B-Instruct (~1.95 GB) — Deep Pedagogy (Recommended)",
+            variable=self.model_choice_var,
+            value="3b",
+            fg=COLOR_GOLD,
+            bg="#1d0f2b",
+            selectcolor="#0d0814",
+            activebackground="#1d0f2b",
+            activeforeground=COLOR_GOLD,
+            font=("Helvetica", 9, "bold")
+        )
+        rb1.pack(anchor="w")
+
+        rb2 = tk.Radiobutton(
+            opt_frame,
+            text="Qwen 2.5 1.5B-Instruct (~986 MB) — Ultra-Fast & Compact (Sub-1 GB)",
+            variable=self.model_choice_var,
+            value="1.5b",
+            fg=COLOR_CYAN,
+            bg="#1d0f2b",
+            selectcolor="#0d0814",
+            activebackground="#1d0f2b",
+            activeforeground=COLOR_CYAN,
+            font=("Helvetica", 9)
+        )
+        rb2.pack(anchor="w")
+
+        btn_row = tk.Frame(self.ai_install_card, bg="#1d0f2b")
+        btn_row.pack(fill="x")
+
+        self.btn_install_ai = tk.Button(
+            btn_row,
+            text="📥 Download & Install Offline AI Coach",
+            bg="#3a1859",
+            fg=COLOR_CYAN,
+            font=("Helvetica", 9, "bold"),
+            bd=1,
+            padx=12,
+            pady=6,
+            command=self._on_download_ai_model
+        )
+        self.btn_install_ai.pack(side="left")
+
+        self.lbl_ai_install_status = tk.Label(
+            btn_row,
+            text="Ready to install",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg="#1d0f2b"
+        )
+        self.lbl_ai_install_status.pack(side="left", padx=10)
+
+        self.prog_ai = ttk.Progressbar(self.ai_install_card, orient="horizontal", mode="determinate")
+
+        # B. Automatic AI Debriefing Card (Shown if model installed)
+        self.ai_debrief_card = tk.LabelFrame(
+            self.ai_container,
+            text=" 🤖 AI VOCAL COACH IN-DEPTH DEBRIEF ",
+            bg="#1c0e2c",
+            fg=COLOR_GOLD,
+            font=("Helvetica", 9, "bold"),
+            bd=1,
+            padx=12,
+            pady=10
+        )
+
+        self.lbl_ai_debrief_text = tk.Label(
+            self.ai_debrief_card,
+            text="Take debriefing will appear here once take analysis completes.",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MAIN,
+            bg="#1c0e2c",
+            anchor="w",
+            justify="left",
+            wraplength=420
+        )
+        self.lbl_ai_debrief_text.pack(fill="x")
+
+        # C. Interactive Performance Conversation Card
+        self.conversation_card = tk.LabelFrame(
+            self.ai_container,
+            text=" 💬 CONVERSATION WITH COACH ",
+            bg="#150a22",
+            fg=COLOR_CYAN,
+            font=("Helvetica", 9, "bold"),
+            bd=1,
+            padx=12,
+            pady=10
+        )
+
+        # Quick Action Pills
+        pills_row = tk.Frame(self.conversation_card, bg="#150a22")
+        pills_row.pack(fill="x", pady=(0, 6))
+
+        btn_p1 = tk.Button(
+            pills_row,
+            text="🎯 Fix Pitch Droop",
+            font=("Helvetica", 7, "bold"),
+            bg="#2a143f",
+            fg=COLOR_TEXT_MAIN,
+            bd=0,
+            padx=6,
+            pady=3,
+            command=lambda: self._send_coach_prompt("How can I fix pitch droop at the ends of my phrases?")
+        )
+        btn_p1.pack(side="left", padx=(0, 4))
+
+        btn_p2 = tk.Button(
+            pills_row,
+            text="🎹 Key Shift Advice",
+            font=("Helvetica", 7, "bold"),
+            bg="#2a143f",
+            fg=COLOR_GOLD,
+            bd=0,
+            padx=6,
+            pady=3,
+            command=lambda: self._send_coach_prompt("Would changing the key shift make this song fit my voice better?")
+        )
+        btn_p2.pack(side="left", padx=4)
+
+        btn_p3 = tk.Button(
+            pills_row,
+            text="✨ Add Resonance Ring",
+            font=("Helvetica", 7, "bold"),
+            bg="#2a143f",
+            fg=COLOR_CYAN,
+            bd=0,
+            padx=6,
+            pady=3,
+            command=lambda: self._send_coach_prompt("How can I get more singer's formant ring without throat strain?")
+        )
+        btn_p3.pack(side="left", padx=4)
+
+        # Chat Transcript Frame
+        self.chat_transcript_container = tk.Frame(self.conversation_card, bg="#0d0615", bd=1, relief="solid", padx=8, pady=6)
+        self.chat_transcript_container.pack(fill="both", expand=True, pady=(2, 8))
+
+        self.lbl_chat_intro = tk.Label(
+            self.chat_transcript_container,
+            text="Ask Maestro Tiki anything about your take, breath technique, or key adjustments:",
+            font=("Helvetica", 8, "italic"),
+            fg=COLOR_TEXT_MUTED,
+            bg="#0d0615"
+        )
+        self.lbl_chat_intro.pack(anchor="w")
+
+        # Chat Input Row
+        chat_input_row = tk.Frame(self.conversation_card, bg="#150a22")
+        chat_input_row.pack(fill="x")
+
+        self.ent_chat_input = tk.Entry(
+            chat_input_row,
+            font=("Helvetica", 9),
+            bg="#0d0814",
+            fg=COLOR_TEXT_MAIN,
+            insertbackground=COLOR_CYAN,
+            bd=1,
+            relief="solid"
+        )
+        self.ent_chat_input.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.ent_chat_input.bind("<Return>", lambda e: self._on_submit_chat())
+
+        self.btn_send_chat = tk.Button(
+            chat_input_row,
+            text="Send ➔",
+            font=("Helvetica", 8, "bold"),
+            bg=COLOR_CYAN,
+            fg="#000000",
+            bd=0,
+            padx=10,
+            pady=4,
+            command=self._on_submit_chat
+        )
+        self.btn_send_chat.pack(side="right")
+
+        self._refresh_ai_coach_view()
+
         def _on_resize_notes(event):
             wrap = max(260, event.width - 60)
             if hasattr(self, "lbl_coach_empty") and self.lbl_coach_empty.winfo_exists():
                 self.lbl_coach_empty.config(wraplength=wrap)
+            if hasattr(self, "lbl_ai_debrief_text") and self.lbl_ai_debrief_text.winfo_exists():
+                self.lbl_ai_debrief_text.config(wraplength=wrap)
             for widget in self.coach_feedback_container.winfo_children():
                 for sub in widget.winfo_children():
                     if isinstance(sub, tk.Label) and sub.cget("text") != "✦":
                         sub.config(wraplength=wrap)
+            if hasattr(self, "chat_transcript_container"):
+                for w in self.chat_transcript_container.winfo_children():
+                    if isinstance(w, tk.Label):
+                        w.config(wraplength=wrap)
         self.notes_frame.bind("<Configure>", _on_resize_notes)
 
     def _create_metric_tile(self, parent: tk.Frame, title: str, val: str, sub: str) -> tk.Frame:
@@ -979,6 +1303,11 @@ class StudioCockpitWindow:
         self.player.stop()
         final_take = self.recorder.stop_recording()
 
+        # Show multi-stage analysis progress bar
+        self.analysis_prog_bar["value"] = 5
+        self.lbl_analysis_step.config(text="Stopping capture and loading audio...")
+        self.analysis_prog_frame.pack(fill="x", pady=(0, 8), before=self.vu_row)
+
         # Run analysis on background thread
         threading.Thread(
             target=self._run_take_analysis,
@@ -993,7 +1322,16 @@ class StudioCockpitWindow:
 
     def _run_take_analysis(self, take_wav: Optional[Path]):
         if not take_wav or not take_wav.exists():
+            self.root.after_idle(lambda: self.analysis_prog_frame.pack_forget())
             return
+
+        def _prog_cb(pct: float, step_msg: str):
+            def _ui():
+                if hasattr(self, "analysis_prog_bar") and self.analysis_prog_bar.winfo_exists():
+                    self.analysis_prog_bar["value"] = int(pct * 100)
+                    self.lbl_analysis_step.config(text=f"[{int(pct * 100)}%] {step_msg}")
+                self.lbl_status.config(text=f"Analyzing take ({int(pct * 100)}%): {step_msg}")
+            self.root.after_idle(_ui)
 
         # Reference sing-along vocal if available
         ref_path = None
@@ -1008,12 +1346,17 @@ class StudioCockpitWindow:
         report = self.analyzer.analyze_take(
             singer_wav=take_wav,
             reference_wav=ref_path,
-            key_shift=self.current_key_shift
+            key_shift=self.current_key_shift,
+            progress_cb=_prog_cb
         )
 
         self.root.after_idle(lambda: self._display_report_card(report))
 
     def _display_report_card(self, report: TakeAnalysisReport):
+        # Hide analysis progress bar
+        if hasattr(self, "analysis_prog_frame") and self.analysis_prog_frame.winfo_exists():
+            self.analysis_prog_frame.pack_forget()
+
         self.lbl_score_num.config(text=str(report.overall_score))
         self.tile_pitch._val_lbl.config(text=f"{report.pitch_accuracy_pct}%")
         self.tile_into._val_lbl.config(text=f"{report.intonation_cents:+0.1f}¢")
@@ -1023,6 +1366,14 @@ class StudioCockpitWindow:
         self.tile_res._sub_lbl.config(text=report.resonance_verdict)
         self.tile_breath._val_lbl.config(text=f"{report.breath_support_pct:.0f}%")
         self.tile_breath._sub_lbl.config(text=report.breath_support_verdict)
+
+        # Update Expandable Acoustic Drawer
+        self.lbl_drawer_dyn.config(text=f"{report.energy_steadiness_pct:.0f}% ({report.dynamics_verdict})")
+        self.lbl_drawer_sib.config(text=f"{report.sibilance_verdict} (ratio: {report.sibilance_ratio:.2f})")
+        self.lbl_drawer_fry.config(text=f"{report.vocal_fry_pct:.0f}% ({report.vocal_fry_verdict})")
+
+        # Save last report for conversational context
+        self._last_take_report = report
 
         # Clear previous feedback items
         for child in self.coach_feedback_container.winfo_children():
@@ -1056,7 +1407,81 @@ class StudioCockpitWindow:
             )
             msg_lbl.pack(side="left", fill="x", expand=True)
 
-        # 2. Add Smart Key recommendation card if present
+        # 2. Add Timestamped Phrase Highlights Card
+        if report.phrase_highlights:
+            hl_box = tk.Frame(self.coach_feedback_container, bg="#0e2320", bd=1, relief="solid", padx=10, pady=8)
+            hl_box.pack(fill="x", pady=(8, 4), anchor="w")
+
+            tk.Label(
+                hl_box,
+                text="🌟 Song Peak Highlights (Timestamped):",
+                font=("Helvetica", 9, "bold"),
+                fg=COLOR_LIME,
+                bg="#0e2320"
+            ).pack(anchor="w")
+
+            for h in report.phrase_highlights:
+                h_row = tk.Frame(hl_box, bg="#0e2320")
+                h_row.pack(fill="x", pady=(4, 2), anchor="w")
+
+                tk.Label(
+                    h_row,
+                    text=f"• [{h['timestamp']}] {h['note_span']}:",
+                    font=("Helvetica", 8, "bold"),
+                    fg=COLOR_CYAN,
+                    bg="#0e2320"
+                ).pack(anchor="w")
+
+                tk.Label(
+                    h_row,
+                    text=h['detail'],
+                    font=("Helvetica", 8),
+                    fg=COLOR_TEXT_MAIN,
+                    bg="#0e2320",
+                    wraplength=avail_wrap - 30,
+                    justify="left"
+                ).pack(anchor="w", padx=(10, 0))
+
+        # 3. Add Timestamped Focus / Struggle Card
+        if report.phrase_struggles:
+            st_box = tk.Frame(self.coach_feedback_container, bg="#271120", bd=1, relief="solid", padx=10, pady=8)
+            st_box.pack(fill="x", pady=(4, 4), anchor="w")
+
+            tk.Label(
+                st_box,
+                text="⚠️ Focus & Struggle Moments (Timestamped):",
+                font=("Helvetica", 9, "bold"),
+                fg="#ff70a6",
+                bg="#271120"
+            ).pack(anchor="w")
+
+            for s in report.phrase_struggles:
+                s_row = tk.Frame(st_box, bg="#271120")
+                s_row.pack(fill="x", pady=(4, 2), anchor="w")
+
+                tk.Label(
+                    s_row,
+                    text=f"• [{s['timestamp']}] {s['note_span']}:",
+                    font=("Helvetica", 8, "bold"),
+                    fg=COLOR_GOLD,
+                    bg="#271120"
+                ).pack(anchor="w")
+
+                s_body = s['detail']
+                if s.get("cue"):
+                    s_body += f"\n👉 Cue: {s['cue']}"
+
+                tk.Label(
+                    s_row,
+                    text=s_body,
+                    font=("Helvetica", 8),
+                    fg=COLOR_TEXT_MAIN,
+                    bg="#271120",
+                    wraplength=avail_wrap - 30,
+                    justify="left"
+                ).pack(anchor="w", padx=(10, 0))
+
+        # 4. Add Smart Key recommendation card if present
         if report.key_recommendation_reason:
             smart_box = tk.Frame(self.coach_feedback_container, bg="#201133", bd=1, relief="solid", padx=10, pady=8)
             smart_box.pack(fill="x", pady=(8, 4), anchor="w")
@@ -1084,7 +1509,145 @@ class StudioCockpitWindow:
             )
             body_lbl.pack(fill="x", pady=(4, 0))
 
+        # 5. Automatically trigger AI Take Debriefing
+        self._trigger_ai_take_debrief(report)
+
+        self.root.update_idletasks()
+        if hasattr(self, "report_canvas"):
+            self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
+
         self.lbl_status.config(text="Performance analysis complete. Great work!")
+
+    def _on_toggle_drawer(self):
+        if not self._drawer_expanded:
+            self.drawer_subcards.pack(fill="x", pady=(4, 0))
+            self.btn_toggle_drawer.config(text="▼ Acoustic Timbre & Dynamics Breakdown (Click to Collapse)")
+            self._drawer_expanded = True
+        else:
+            self.drawer_subcards.pack_forget()
+            self.btn_toggle_drawer.config(text="▶ Acoustic Timbre & Dynamics Breakdown (Click to Expand)")
+            self._drawer_expanded = False
+
+        self.root.update_idletasks()
+        if hasattr(self, "report_canvas"):
+            self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
+
+    def _refresh_ai_coach_view(self):
+        installed = self.offline_coach.get_installed_model()
+        if installed:
+            self.ai_install_card.pack_forget()
+            self.ai_debrief_card.pack(fill="x", pady=(8, 0))
+            self.conversation_card.pack(fill="x", pady=(8, 0))
+        else:
+            self.ai_debrief_card.pack_forget()
+            self.conversation_card.pack_forget()
+            self.ai_install_card.pack(fill="x", pady=(8, 0))
+
+        self.root.update_idletasks()
+        if hasattr(self, "report_canvas"):
+            self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
+
+    def _on_download_ai_model(self):
+        if self._is_downloading_model:
+            return
+
+        choice = self.model_choice_var.get()
+        meta = AVAILABLE_MODELS.get(choice, AVAILABLE_MODELS["3b"])
+        self._is_downloading_model = True
+        self.btn_install_ai.config(state="disabled", text="⏳ Downloading Model...")
+        self.prog_ai.pack(fill="x", pady=(8, 4))
+        self.prog_ai["value"] = 0
+        self.lbl_ai_install_status.config(text=f"Connecting to Hugging Face ({meta['size_str']})...")
+
+        def _progress(pct, msg):
+            def _ui():
+                self.prog_ai["value"] = int(pct * 100)
+                self.lbl_ai_install_status.config(text=msg)
+            self.root.after_idle(_ui)
+
+        def _worker():
+            success = self.offline_coach.download_model(choice, progress_cb=_progress)
+            def _done():
+                self._is_downloading_model = False
+                self.btn_install_ai.config(state="normal", text="📥 Download & Install Offline AI Coach")
+                if success:
+                    messagebox.showinfo("Installation Complete", f"Offline AI Coach ({meta['name']}) installed successfully!\n\nAll AI coaching is now 100% offline.")
+                    self._refresh_ai_coach_view()
+                    if self._last_take_report:
+                        self._trigger_ai_take_debrief(self._last_take_report)
+                else:
+                    messagebox.showwarning("Download Notice", "Could not complete model download. Please check your internet connection and try again.")
+            self.root.after_idle(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _trigger_ai_take_debrief(self, report: TakeAnalysisReport):
+        self._refresh_ai_coach_view()
+        if not self.offline_coach.is_installed():
+            return
+
+        self.lbl_ai_debrief_text.config(text="✦ Maestro Tiki is analyzing your take metrics offline...", fg=COLOR_CYAN)
+
+        def _worker():
+            profile_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
+            debrief = self.offline_coach.generate_take_debrief(
+                report.to_dict(),
+                self.selected_track,
+                profile_dict
+            )
+            def _update():
+                self.lbl_ai_debrief_text.config(text=debrief, fg=COLOR_TEXT_MAIN)
+            self.root.after_idle(_update)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _send_coach_prompt(self, msg: str):
+        self.ent_chat_input.delete(0, tk.END)
+        self.ent_chat_input.insert(0, msg)
+        self._on_submit_chat()
+
+    def _on_submit_chat(self):
+        msg = self.ent_chat_input.get().strip()
+        if not msg or self._is_ai_generating:
+            return
+
+        self.ent_chat_input.delete(0, tk.END)
+        self._is_ai_generating = True
+        self.btn_send_chat.config(state="disabled")
+
+        if hasattr(self, "lbl_chat_intro") and self.lbl_chat_intro.winfo_exists():
+            self.lbl_chat_intro.destroy()
+
+        user_row = tk.Frame(self.chat_transcript_container, bg="#0d0615")
+        user_row.pack(fill="x", pady=2, anchor="w")
+        tk.Label(user_row, text="👤 You:", font=("Helvetica", 8, "bold"), fg=COLOR_CYAN, bg="#0d0615").pack(side="left", anchor="nw")
+        tk.Label(user_row, text=msg, font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#0d0615", wraplength=380, justify="left").pack(side="left", padx=4)
+
+        coach_row = tk.Frame(self.chat_transcript_container, bg="#0d0615")
+        coach_row.pack(fill="x", pady=2, anchor="w")
+        tk.Label(coach_row, text="🌺 Coach Tiki:", font=("Helvetica", 8, "bold"), fg=COLOR_GOLD, bg="#0d0615").pack(side="left", anchor="nw")
+        coach_lbl = tk.Label(coach_row, text="Thinking...", font=("Helvetica", 8, "italic"), fg=COLOR_TEXT_MUTED, bg="#0d0615", wraplength=380, justify="left")
+        coach_lbl.pack(side="left", padx=4)
+
+        self.chat_history.append({"role": "user", "content": msg})
+
+        def _worker():
+            rep_dict = self._last_take_report.to_dict() if self._last_take_report else None
+            reply = self.offline_coach.chat_with_coach(
+                msg,
+                self.chat_history,
+                rep_dict,
+                self.selected_track
+            )
+            self.chat_history.append({"role": "assistant", "content": reply})
+
+            def _update():
+                coach_lbl.config(text=reply, font=("Helvetica", 8), fg=COLOR_TEXT_MAIN)
+                self._is_ai_generating = False
+                self.btn_send_chat.config(state="normal")
+            self.root.after_idle(_update)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_search_library(self):
         query = self.ent_search.get().strip()

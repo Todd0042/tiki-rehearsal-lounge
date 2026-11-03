@@ -1,0 +1,365 @@
+"""
+Tiki Rehearsal Lounge - Embedded 100% Offline AI Vocal Coach Engine
+===================================================================
+Operates 100% locally with zero cloud dependencies, zero external accounts,
+zero API keys, and zero rate-limit quotas.
+
+Supported Quantized GGUF Models:
+1. Qwen2.5-3B-Instruct (Q4_K_M) - ~1.95 GB (Deep vocal pedagogy & nuanced feedback)
+2. Qwen2.5-1.5B-Instruct (Q4_K_M) - ~986 MB (Sub-1 GB, ultra-fast generation on CPU)
+"""
+
+from __future__ import annotations
+import os
+import sys
+import time
+import json
+import threading
+import urllib.request
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Callable
+
+from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME
+
+MODELS_DIR = Path.home() / ".config" / "TikiRehearsalLounge" / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
+    "3b": {
+        "key": "3b",
+        "name": "Qwen2.5-3B-Instruct (Q4_K_M)",
+        "tagline": "Deep Vocal Pedagogy & Musical Nuance",
+        "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
+        "size_str": "~1.95 GB",
+        "size_bytes": 2085000000,
+        "speed": "~30–45 tok/s on CPU",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+    },
+    "1.5b": {
+        "key": "1.5b",
+        "name": "Qwen2.5-1.5B-Instruct (Q4_K_M)",
+        "tagline": "Ultra-Fast & Compact (Sub-1 GB)",
+        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "size_str": "~986 MB",
+        "size_bytes": 986000000,
+        "speed": "~60–80 tok/s on CPU",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    }
+}
+
+SYSTEM_PROMPT = (
+    "You are Maestro Tiki, an encouraging, world-class vocal coach and master rehearsal director "
+    "inside a retro neon Polynesian studio lounge. You analyze performance takes with sharp "
+    "acoustic and musical precision (pitch accuracy, intonation drift, diaphragmatic breath support, "
+    "singer's formant resonance ring, glottal attack onset dynamics, energy steadiness, sibilance, and vocal fry). "
+    "Provide warm, supportive, actionable feedback with specific physical vocal cues (soft palate, mask placement, "
+    "ribcage expansion, tongue posture, key shift recommendations). "
+    "Keep take debriefings focused to 2 concise paragraphs with 2 bullet action items. Never sound robotic."
+)
+
+
+class OfflineVocalCoach:
+    def __init__(self):
+        self.models_dir = MODELS_DIR
+        self._llm = None
+        self._loaded_model_key: Optional[str] = None
+        self._load_lock = threading.Lock()
+
+    def get_installed_model(self) -> Optional[Dict[str, Any]]:
+        """Returns metadata of currently installed model, if any."""
+        for key, meta in AVAILABLE_MODELS.items():
+            p = self.models_dir / meta["filename"]
+            if p.exists() and p.stat().st_size > (meta["size_bytes"] * 0.85):
+                return {**meta, "path": p}
+        return None
+
+    def is_installed(self) -> bool:
+        return self.get_installed_model() is not None
+
+    def download_model(
+        self,
+        model_key: str,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None
+    ) -> bool:
+        """
+        Downloads the requested GGUF model chunk-by-chunk with progress reporting.
+        """
+        meta = AVAILABLE_MODELS.get(model_key)
+        if not meta:
+            return False
+
+        target_file = self.models_dir / meta["filename"]
+        tmp_file = self.models_dir / f"{meta['filename']}.tmp"
+
+        url = meta["url"]
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) TikiRehearsalLounge/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp, open(tmp_file, "wb") as out:
+                total_bytes = int(resp.headers.get("Content-Length", meta["size_bytes"]))
+                downloaded = 0
+                chunk_size = 1024 * 1024  # 1 MB
+
+                while True:
+                    if cancel_event and cancel_event.is_set():
+                        if tmp_file.exists():
+                            tmp_file.unlink()
+                        return False
+
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    out.write(chunk)
+                    downloaded += len(chunk)
+                    pct = min(1.0, downloaded / max(1, total_bytes))
+                    mb_down = downloaded / (1024 * 1024)
+                    mb_total = total_bytes / (1024 * 1024)
+
+                    if progress_cb:
+                        progress_cb(pct, f"{mb_down:.1f} MB / {mb_total:.1f} MB ({int(pct * 100)}%)")
+
+            # Finalize file rename
+            if tmp_file.exists():
+                tmp_file.rename(target_file)
+
+            if progress_cb:
+                progress_cb(1.0, f"Installed {meta['name']} successfully!")
+
+            return True
+
+        except Exception as e:
+            if tmp_file.exists():
+                tmp_file.unlink()
+            if progress_cb:
+                progress_cb(0.0, f"Download failed: {e}")
+            return False
+
+    def load_engine(self) -> bool:
+        """Loads llama-cpp-python engine with installed model."""
+        with self._load_lock:
+            installed = self.get_installed_model()
+            if not installed:
+                return False
+
+            if self._llm is not None and self._loaded_model_key == installed["key"]:
+                return True
+
+            try:
+                from llama_cpp import Llama
+                # Set up Llama with AVX2 multi-threading
+                n_threads = max(2, os.cpu_count() - 1 if os.cpu_count() else 4)
+                self._llm = Llama(
+                    model_path=str(installed["path"]),
+                    n_ctx=2048,
+                    n_threads=n_threads,
+                    verbose=False
+                )
+                self._loaded_model_key = installed["key"]
+                return True
+            except ImportError:
+                print("[OfflineVocalCoach] Notice: llama-cpp-python is not installed in Python environment.", file=sys.stderr)
+                return False
+            except Exception as e:
+                print(f"[OfflineVocalCoach] Engine load error: {e}", file=sys.stderr)
+                return False
+
+    def generate_take_debrief(
+        self,
+        report_data: Dict[str, Any],
+        track_info: Optional[Dict[str, Any]] = None,
+        profile_data: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Synthesizes raw DSP metrics into an encouraging, pedagogical 2-paragraph debrief.
+        """
+        if not self.load_engine():
+            return self._generate_rule_based_debrief(report_data, track_info, profile_data)
+
+        # Build prompt
+        prompt = self._build_debrief_prompt(report_data, track_info, profile_data)
+
+        try:
+            output = self._llm(
+                prompt,
+                max_tokens=550,
+                temperature=0.7,
+                top_p=0.9,
+                stop=["<|im_end|>", "<|endoftext|>"]
+            )
+            text = output["choices"][0]["text"].strip()
+            return text if text else self._generate_rule_based_debrief(report_data, track_info, profile_data)
+        except Exception as e:
+            print(f"[OfflineVocalCoach] Inference error: {e}", file=sys.stderr)
+            return self._generate_rule_based_debrief(report_data, track_info, profile_data)
+
+    def chat_with_coach(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        report_data: Optional[Dict[str, Any]] = None,
+        track_info: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Interactive conversational reply regarding the take and vocal mechanics.
+        """
+        if not self.load_engine():
+            return (
+                "Offline engine is operating in fallback mode. (Install 'llama-cpp-python' to enable full "
+                "local LLM dialogue). Based on your take metrics, focus on steady ribcage breath pressure "
+                "and keeping vowel resonance centered in your facial mask!"
+            )
+
+        prompt = self._build_chat_prompt(user_message, conversation_history, report_data, track_info)
+
+        try:
+            output = self._llm(
+                prompt,
+                max_tokens=280,
+                temperature=0.7,
+                top_p=0.9,
+                stop=["<|im_end|>", "<|endoftext|>", "Singer:"]
+            )
+            return output["choices"][0]["text"].strip()
+        except Exception as e:
+            return f"Coach note: Keep practicing with relaxed throat and diaphragmatic breath support! (Error: {e})"
+
+    def _build_debrief_prompt(
+        self,
+        report: Dict[str, Any],
+        track_info: Optional[Dict[str, Any]],
+        profile: Optional[Dict[str, Any]]
+    ) -> str:
+        track_title = track_info.get("title", "Rehearsal Song") if track_info else "Rehearsal Song"
+        track_artist = track_info.get("artist", "") if track_info else ""
+        shift = report.get("current_key_shift", 0)
+        rec_shift = report.get("recommended_key_shift", 0)
+
+        highlights = report.get("phrase_highlights", [])
+        struggles = report.get("phrase_struggles", [])
+
+        phrase_section = ""
+        if highlights:
+            phrase_section += "\nTop Song Highlights (Timestamped):\n"
+            for h in highlights:
+                phrase_section += f"- [{h['timestamp']}] ({h['note_span']}): {h['detail']}\n"
+
+        if struggles:
+            phrase_section += "\nTop Focus / Struggle Moments (Timestamped):\n"
+            for s in struggles:
+                phrase_section += f"- [{s['timestamp']}] ({s['note_span']}): {s['detail']} | Mechanical Cue: {s.get('cue', '')}\n"
+
+        prompt = (
+            f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Here are the objective audio analysis results for my vocal take of '{track_title}' {f'by {track_artist}' if track_artist else ''}:\n"
+            f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
+            f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% within ±50 cents\n"
+            f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', '')})\n"
+            f"- Resonance Ring: {report.get('resonance_verdict', '')} (ratio {report.get('singers_formant_ratio', 0)})\n"
+            f"- Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', '')})\n"
+            f"- Glottal Attack: {report.get('onset_attack_verdict', '')}\n"
+            f"- Key Shift: {shift:+d} semitones (Recommended: {rec_shift:+d} semitones)\n"
+            f"{phrase_section}\n"
+            f"Give me an encouraging, human-grade, in-depth studio debrief structured with:\n"
+            f"1. 🌟 **What Clicked ([MM:SS])**: Detail the specific timestamped passages where I excelled, the notes, and why the tone worked.\n"
+            f"2. ⚠️ **Where It Slipped ([MM:SS])**: Detail the specific timestamped passages where pitch wandered or breath sagged, explaining the acoustic cause.\n"
+            f"3. 🛠️ **Targeted Physical Adjustments**: Exactly 2 actionable mechanical cues (ribcage expansion, soft palate lift, mask placement) to fix the struggle moments on my next take.\n"
+            f"Speak directly to me like an expert mentor in the studio lounge. Do NOT just recite global percentages.<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        return prompt
+
+    def _build_chat_prompt(
+        self,
+        user_msg: str,
+        history: List[Dict[str, str]],
+        report: Optional[Dict[str, Any]],
+        track_info: Optional[Dict[str, Any]]
+    ) -> str:
+        prompt = f"<|im_start|>system\n{SYSTEM_PROMPT}\n"
+        if report:
+            highlights = report.get("phrase_highlights", [])
+            struggles = report.get("phrase_struggles", [])
+            h_str = "; ".join([f"[{h['timestamp']}] {h['note_span']}" for h in highlights]) if highlights else "None"
+            s_str = "; ".join([f"[{s['timestamp']}] {s['note_span']}" for s in struggles]) if struggles else "None"
+
+            prompt += (
+                f"Context for Current Take: Score {report.get('overall_score')}/100, "
+                f"Pitch {report.get('pitch_accuracy_pct')}%, Intonation {report.get('intonation_cents'):+0.1f}¢, "
+                f"Resonance {report.get('resonance_verdict')}, Breath {report.get('breath_support_verdict')}, "
+                f"Attacks {report.get('onset_attack_verdict')}, Key Shift: {report.get('current_key_shift', 0):+d}.\n"
+                f"Song Highlights: {h_str}\n"
+                f"Struggle Focus Moments: {s_str}\n"
+            )
+        prompt += "<|im_end|>\n"
+
+        # Add recent history (last 4 turns)
+        for turn in history[-4:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+
+        prompt += f"<|im_start|>user\n{user_msg}<|im_end|>\n<|im_start|>assistant\n"
+        return prompt
+
+    @staticmethod
+    def _generate_rule_based_debrief(
+        report: Dict[str, Any],
+        track_info: Optional[Dict[str, Any]],
+        profile: Optional[Dict[str, Any]]
+    ) -> str:
+        """High-grade pedagogical debrief synthesis incorporating timestamped song moments."""
+        score = report.get("overall_score", 0)
+        pitch = report.get("pitch_accuracy_pct", 0)
+        into = report.get("intonation_cents", 0.0)
+        breath = report.get("breath_support_pct", 0)
+        res = report.get("resonance_verdict", "Balanced")
+        shift = report.get("current_key_shift", 0)
+        rec_shift = report.get("recommended_key_shift", 0)
+        highlights = report.get("phrase_highlights", [])
+        struggles = report.get("phrase_struggles", [])
+
+        lines = []
+
+        lines.append(
+            f"Solid take! Scoring **{score}/100**, your vocal showed a **{res}** tone character with strong dynamic commitment. "
+            "Here is the chronological breakdown of where you locked into the pocket and where to make physical adjustments:"
+        )
+
+        # 1. What Clicked
+        lines.append("\n🌟 **What Clicked**:")
+        if highlights:
+            for h in highlights:
+                lines.append(f"• **[{h['timestamp']}] ({h['note_span']})**: {h['detail']}")
+        else:
+            lines.append("• Vocal onsets showed clean dynamic energy with healthy phonation.")
+
+        # 2. Where It Slipped
+        lines.append("\n⚠️ **Where It Slipped**:")
+        if struggles:
+            for s in struggles:
+                lines.append(f"• **[{s['timestamp']}] ({s['note_span']})**: {s['detail']}")
+        else:
+            lines.append("• Minor intonation variances detected during rapid melodic transitions.")
+
+        # 3. Targeted Physical Adjustments
+        lines.append("\n🛠️ **Targeted Physical Adjustments**:")
+        if struggles and any(s.get("cue") for s in struggles):
+            cues = [s["cue"] for s in struggles if s.get("cue")]
+            for idx, c in enumerate(cues[:2], 1):
+                lines.append(f"{idx}. {c}")
+        else:
+            lines.append("1. Keep your lower ribcage expanded through the vowel tail to maintain air pressure without throat tension.")
+            lines.append("2. Lift your soft palate (think of starting a relaxed yawn) before ascending into higher phrases.")
+
+        if shift != rec_shift:
+            lines.append(
+                f"\n💡 **Key Strategy**: Transposing from {shift:+d} to **{rec_shift:+d}** semitones will bring "
+                f"the track's highest melody peak into your power sweet spot without straining."
+            )
+
+        return "\n".join(lines)

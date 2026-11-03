@@ -66,9 +66,31 @@ class TakeAnalysisReport:
     onset_attack_verdict: str       # "Balanced Clean Onsets", "Hard Glottal Punches", "Airy / Breathy Entries"
     balanced_onsets_pct: float      # % of vocal entries with balanced dynamics
 
+    # Dynamic Compression & Energy Steadiness
+    energy_steadiness_pct: float    # 0 - 100%
+    dynamics_verdict: str           # "Even & Controlled Dynamics", "Sudden Volume Spikes", "Fading Projection"
+
+    # Consonant Crispness & Sibilance (5 - 8 kHz)
+    sibilance_ratio: float          # High friction band ratio
+    sibilance_verdict: str          # "Crisp & Articulate", "Harsh Sibilance", "Muddy / Swallowed Diction"
+
+    # Vocal Fry & Creakiness Detection
+    vocal_fry_pct: float            # 0 - 100%
+    vocal_fry_verdict: str          # "Clean Core Phonation", "Stylistic Creak (<15%)", "Heavy Vocal Fry / Cord Fatigue"
+
     # Overall Score & Feedback
     overall_score: int              # 0 - 100
     coach_feedback: List[str]
+
+    # Timestamped Phrase Breakdown
+    phrase_highlights: List[Dict[str, Any]] = None
+    phrase_struggles: List[Dict[str, Any]] = None
+
+    def __post_init__(self):
+        if self.phrase_highlights is None:
+            self.phrase_highlights = []
+        if self.phrase_struggles is None:
+            self.phrase_struggles = []
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -165,11 +187,16 @@ class VocalTakeAnalyzer:
         self,
         singer_wav: Path,
         reference_wav: Optional[Path] = None,
-        key_shift: int = 0
+        key_shift: int = 0,
+        progress_cb: Optional[Callable[[float, str], None]] = None
     ) -> TakeAnalysisReport:
         """
         Evaluates singer recording against reference guide vocal or chromatic pitch grid.
+        Includes multi-stage progress reporting and timestamped phrase-level breakdowns.
         """
+        if progress_cb:
+            progress_cb(0.10, "Loading audio and extracting vocal pitch contour...")
+
         singer_audio, sr = read_wav_mono(singer_wav)
         s_times, s_pitches = extract_pitch_contour(singer_audio, sr, voicing_threshold=0.35)
 
@@ -177,6 +204,8 @@ class VocalTakeAnalyzer:
         s_voiced = s_pitches[s_voiced_mask]
 
         if len(s_voiced) < 20:
+            if progress_cb:
+                progress_cb(1.00, "Analysis complete (no vocal signal detected).")
             # Fallback for silent / inaudible take
             return TakeAnalysisReport(
                 pitch_accuracy_pct=0.0,
@@ -199,9 +228,20 @@ class VocalTakeAnalyzer:
                 breath_support_verdict="N/A",
                 onset_attack_verdict="N/A",
                 balanced_onsets_pct=0.0,
+                energy_steadiness_pct=0.0,
+                dynamics_verdict="N/A",
+                sibilance_ratio=0.0,
+                sibilance_verdict="N/A",
+                vocal_fry_pct=0.0,
+                vocal_fry_verdict="N/A",
                 overall_score=0,
-                coach_feedback=["No sustained vocal audio was detected in this take."]
+                coach_feedback=["No sustained vocal audio was detected in this take."],
+                phrase_highlights=[],
+                phrase_struggles=[]
             )
+
+        if progress_cb:
+            progress_cb(0.30, "Aligning vocal melody and detecting intonation drift...")
 
         # Singer range
         take_min_hz = float(np.percentile(s_voiced, 5))
@@ -211,8 +251,9 @@ class VocalTakeAnalyzer:
         take_range = float(take_max_midi - take_min_midi)
 
         # 1. Pitch Accuracy & Intonation Drift
+        ref_pitches = None
         if reference_wav and reference_wav.exists():
-            pitch_acc, intonation, rhythm_ms = self._compare_with_reference(
+            pitch_acc, intonation, rhythm_ms, ref_pitches = self._compare_with_reference(
                 s_times, s_pitches, reference_wav, key_shift
             )
         else:
@@ -239,6 +280,9 @@ class VocalTakeAnalyzer:
         else:
             rhythm_verdict = f"Dragging (+{int(rhythm_ms)}ms)"
 
+        if progress_cb:
+            progress_cb(0.50, "Calculating Singer's Formant ring and breath decay stability...")
+
         # 2. Vibrato Analysis
         vib_rate, vib_depth, vib_present = self._analyze_vibrato(s_pitches, hop_ms=15.0)
 
@@ -248,16 +292,41 @@ class VocalTakeAnalyzer:
         # 4. Breath Support & Phrase-End Decay Stability
         breath_pct, breath_verdict = self._analyze_breath_support(s_pitches, hop_ms=15.0)
 
+        if progress_cb:
+            progress_cb(0.70, "Analyzing glottal attacks, dynamics, and sibilance...")
+
         # 5. Glottal Attack Dynamics
         attack_verdict, balanced_onsets_pct = self._analyze_glottal_attacks(singer_audio, sr, s_pitches, hop_ms=15.0)
 
-        # 6. Smart Key Recommendation
+        # 6. Dynamic Compression & Energy Steadiness
+        energy_pct, dynamics_verdict = self._analyze_dynamics(singer_audio, sr, s_pitches, hop_ms=15.0)
+
+        # 7. Consonant Crispness & Sibilance (5 - 8 kHz)
+        sibilance_ratio, sibilance_verdict = self._analyze_sibilance(singer_audio, sr, s_pitches, hop_ms=15.0)
+
+        # 8. Vocal Fry & Creakiness Detection
+        fry_pct, fry_verdict = self._analyze_vocal_fry(singer_audio, sr, s_pitches, hop_ms=15.0)
+
+        # 9. Smart Key Recommendation
         rec_shift, rec_reason = self.recommend_key_for_track({
             "min_hz": take_min_hz,
             "max_hz": take_max_hz
         })
 
-        # 7. Overall Score calculation (0 - 100)
+        if progress_cb:
+            progress_cb(0.85, "Pinpointing timestamped song highlights & struggle focus moments...")
+
+        # 10. Timestamped Phrase Breakdown & Song Moments
+        phrase_highlights, phrase_struggles = self._extract_phrase_breakdown(
+            singer_audio=singer_audio,
+            sr=sr,
+            s_times=s_times,
+            s_pitches=s_pitches,
+            ref_pitches=ref_pitches,
+            hop_ms=15.0
+        )
+
+        # 11. Overall Score calculation (0 - 100)
         # 50% pitch accuracy, 15% intonation, 15% rhythm, 10% breath support, 10% balanced onsets
         intonation_penalty = min(20.0, abs(intonation))
         rhythm_penalty = min(20.0, abs(rhythm_ms) / 10.0)
@@ -273,10 +342,12 @@ class VocalTakeAnalyzer:
             score = min(100.0, score + 4.0)  # Bonus for natural expressive vibrato
         if sf_ratio >= 0.45:
             score = min(100.0, score + 3.0)  # Bonus for resonant acoustic projection
+        if energy_pct >= 85.0:
+            score = min(100.0, score + 2.0)  # Bonus for controlled dynamics
 
         overall_score = int(round(max(10.0, min(100.0, score))))
 
-        # 8. Pedagogical Coach Feedback Generation
+        # 12. Pedagogical Coach Feedback Generation
         feedback = []
         if pitch_acc >= 85.0:
             feedback.append("Superb pitch accuracy! You stayed locked into the melodic center.")
@@ -313,6 +384,22 @@ class VocalTakeAnalyzer:
         elif sf_ratio < 0.28:
             feedback.append("Tone is somewhat muffled. Focus on forward mask placement and a lifted soft palate.")
 
+        if dynamics_verdict == "Sudden Volume Spikes":
+            feedback.append("Volume surges detected on consonants; try backing off the mic slightly on loud syllables.")
+        elif dynamics_verdict == "Fading Projection":
+            feedback.append("Phrases lose dynamic presence toward the end; keep core vocal projection active through the full line.")
+
+        if "Harsh" in sibilance_verdict:
+            feedback.append("High sibilance ('S'/'T') is prominent; soften dental consonants to prevent harshness.")
+        elif "Muddy" in sibilance_verdict:
+            feedback.append("Consonants are slightly muffled; articulate consonants crisply with lips and tongue tip.")
+
+        if "Heavy" in fry_verdict:
+            feedback.append("Noticeable vocal fry detected in lower phrases; ensure steady airflow to avoid cord fatigue.")
+
+        if progress_cb:
+            progress_cb(1.00, "Vocal take analysis complete!")
+
         return TakeAnalysisReport(
             pitch_accuracy_pct=round(pitch_acc, 1),
             intonation_cents=round(intonation, 1),
@@ -334,8 +421,16 @@ class VocalTakeAnalyzer:
             breath_support_verdict=breath_verdict,
             onset_attack_verdict=attack_verdict,
             balanced_onsets_pct=round(balanced_onsets_pct, 1),
+            energy_steadiness_pct=round(energy_pct, 1),
+            dynamics_verdict=dynamics_verdict,
+            sibilance_ratio=round(sibilance_ratio, 3),
+            sibilance_verdict=sibilance_verdict,
+            vocal_fry_pct=round(fry_pct, 1),
+            vocal_fry_verdict=fry_verdict,
             overall_score=overall_score,
-            coach_feedback=feedback
+            coach_feedback=feedback,
+            phrase_highlights=phrase_highlights,
+            phrase_struggles=phrase_struggles
         )
 
     def _analyze_against_grid(self, pitches: np.ndarray) -> Tuple[float, float, float]:
@@ -362,7 +457,7 @@ class VocalTakeAnalyzer:
         s_pitches: np.ndarray,
         ref_path: Path,
         key_shift: int
-    ) -> Tuple[float, float, float]:
+    ) -> Tuple[float, float, float, Optional[np.ndarray]]:
         """Aligns singer take against guide vocal track pitch contour."""
         try:
             ref_audio, sr = read_wav_mono(ref_path)
@@ -382,7 +477,8 @@ class VocalTakeAnalyzer:
             voiced_mask = (s_slice > 0) & (r_slice > 0)
             if np.sum(voiced_mask) < 20:
                 # Fallback to chromatic grid if reference alignment has insufficient overlap
-                return self._analyze_against_grid(s_pitches)
+                acc, drift, rhy = self._analyze_against_grid(s_pitches)
+                return acc, drift, rhy, None
 
             s_active = s_slice[voiced_mask]
             r_active = r_slice[voiced_mask]
@@ -396,11 +492,248 @@ class VocalTakeAnalyzer:
 
             # Rhythm onset latency calculation via cross-correlation of energy envelopes
             rhythm_ms = 0.0
-            return acc_pct, intonation, rhythm_ms
+            return acc_pct, intonation, rhythm_ms, r_pitches
 
         except Exception as e:
             print(f"[VocalTakeAnalyzer] Reference comparison failed: {e}. Falling back to pitch grid.")
-            return self._analyze_against_grid(s_pitches)
+            acc, drift, rhy = self._analyze_against_grid(s_pitches)
+            return acc, drift, rhy, None
+
+    def _extract_phrase_breakdown(
+        self,
+        singer_audio: np.ndarray,
+        sr: int,
+        s_times: np.ndarray,
+        s_pitches: np.ndarray,
+        ref_pitches: Optional[np.ndarray] = None,
+        hop_ms: float = 15.0
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Extracts timestamped phrase moments [MM:SS], evaluates phrase-level pitch accuracy,
+        intonation drift, tail breath sag, and Singer's Formant.
+        Returns (top_2_highlights, top_2_struggles).
+        """
+        n_frames = len(s_pitches)
+        if n_frames < 30:
+            return [], []
+
+        # 1. Identify continuous phrases:
+        # Group voiced frames into musical phrases (split on breaths >= 180ms or max 9s duration)
+        phrases_raw = []
+        in_phrase = False
+        phrase_start = None
+        gap_count = 0
+        last_voiced_idx = 0
+
+        for i in range(n_frames):
+            if s_pitches[i] > 0:
+                if phrase_start is None:
+                    phrase_start = i
+                last_voiced_idx = i
+                gap_count = 0
+                # Cap phrase duration at ~9 seconds (600 frames) so long sections segment musically
+                if (i - phrase_start) >= 600:
+                    if (last_voiced_idx - phrase_start) >= 40:
+                        phrases_raw.append((phrase_start, last_voiced_idx))
+                    phrase_start = None
+            else:
+                if phrase_start is not None:
+                    gap_count += 1
+                    if gap_count >= 12:  # ~180ms breath pause defines phrase boundary
+                        if (last_voiced_idx - phrase_start) >= 40:
+                            phrases_raw.append((phrase_start, last_voiced_idx))
+                        phrase_start = None
+                        gap_count = 0
+
+        if phrase_start is not None and (last_voiced_idx - phrase_start) >= 40:
+            phrases_raw.append((phrase_start, last_voiced_idx))
+
+        # Filter phrases: at least 30 voiced frames
+        phrase_metrics = []
+        for start_idx, end_idx in phrases_raw:
+            sub_pitches = s_pitches[start_idx:end_idx + 1]
+            voiced_mask = sub_pitches > 0
+            voiced_pitches = sub_pitches[voiced_mask]
+            if len(voiced_pitches) < 30:
+                continue
+
+            start_t = float(s_times[start_idx])
+            end_t = float(s_times[end_idx])
+            dur = end_t - start_t
+            if dur < 1.5:
+                continue
+
+            # Format timestamps [MM:SS – MM:SS]
+            sm, ss = int(start_t // 60), int(start_t % 60)
+            em, es = int(end_t // 60), int(end_t % 60)
+            if sm == em and ss == es:
+                es = min(59, ss + 1)
+            ts_str = f"{sm}:{ss:02d} – {em}:{es:02d}"
+
+            # Calculate note span
+            midis = [hz_to_midi(p) for p in voiced_pitches]
+            min_m = min(midis)
+            max_m = max(midis)
+            min_name = midi_to_note_name(round(min_m))
+            max_name = midi_to_note_name(round(max_m))
+            note_span = f"{min_name} – {max_name}" if min_name != max_name else min_name
+
+            # Calculate cents errors
+            cents_errs = []
+            if ref_pitches is not None and len(ref_pitches) > end_idx:
+                for idx in range(start_idx, end_idx + 1):
+                    if s_pitches[idx] > 0 and ref_pitches[idx] > 0:
+                        cents_errs.append(1200.0 * np.log2(s_pitches[idx] / ref_pitches[idx]))
+
+            if not cents_errs:
+                # Chromatic grid comparison
+                for m in midis:
+                    nearest = round(m)
+                    cents_errs.append((m - nearest) * 100.0)
+
+            cents_arr = np.array(cents_errs)
+            acc_pct = float(np.sum(np.abs(cents_arr) <= 40.0) / len(cents_arr)) * 100.0
+            med_cents = float(np.median(cents_arr))
+
+            # Phrase-end tail decay pitch sag
+            tail_slice = voiced_pitches[-min(10, len(voiced_pitches)):]
+            body_slice = voiced_pitches[int(len(voiced_pitches) * 0.2):int(len(voiced_pitches) * 0.8)]
+            if len(body_slice) > 0 and len(tail_slice) > 0:
+                tail_med = float(np.median(tail_slice))
+                body_med = float(np.median(body_slice))
+                tail_sag = float(1200.0 * np.log2(tail_med / (body_med + 1e-9)))
+            else:
+                tail_sag = 0.0
+
+            # Local Singer's Formant calculation (ratio 2.5-3.5kHz / 1.0-2.0kHz)
+            a_start = int(start_t * sr)
+            a_end = min(len(singer_audio), int(end_t * sr))
+            local_sf = 0.35
+            if a_end - a_start > sr * 0.3:
+                chunk = singer_audio[a_start:a_end]
+                n_fft = min(2048, len(chunk))
+                spec = np.abs(np.fft.rfft(chunk[:n_fft] * np.hanning(n_fft))) ** 2
+                freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+                sf_p = np.sum(spec[(freqs >= 2500) & (freqs <= 3500)])
+                mid_p = np.sum(spec[(freqs >= 1000) & (freqs <= 2000)])
+                local_sf = float(sf_p / (mid_p + 1e-9))
+
+            phrase_metrics.append({
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "start_t": start_t,
+                "end_t": end_t,
+                "timestamp": ts_str,
+                "note_span": note_span,
+                "max_midi": max_m,
+                "accuracy_pct": acc_pct,
+                "median_cents": med_cents,
+                "tail_sag_cents": tail_sag,
+                "singers_formant": local_sf,
+                "duration": dur
+            })
+
+        if not phrase_metrics:
+            return [], []
+
+        # Sort candidate highlights
+        # High accuracy, centered pitch, stable tail, good formant, and bonus for upper range
+        highlight_cands = sorted(
+            phrase_metrics,
+            key=lambda p: (
+                (p["accuracy_pct"] * 0.6) +
+                (max(0.0, 30.0 - abs(p["median_cents"])) * 0.5) +
+                (min(1.0, p["singers_formant"]) * 20.0) +
+                (p["max_midi"] * 0.3)
+            ),
+            reverse=True
+        )
+
+        highlights = []
+        for p in highlight_cands[:2]:
+            cents_desc = f"{p['median_cents']:+0.1f}¢"
+            if abs(p["median_cents"]) <= 8.0:
+                inton_word = "dead-center on pitch"
+            elif p["median_cents"] > 0:
+                inton_word = f"bright and centered ({cents_desc})"
+            else:
+                inton_word = f"well centered ({cents_desc})"
+
+            tail_word = "steady diaphragmatic breath support" if p["tail_sag_cents"] >= -18.0 else "clean phrase finish"
+            res_word = "strong singer's formant cut" if p["singers_formant"] >= 0.40 else "clean, warm acoustic tone"
+
+            detail = (
+                f"Locked {inton_word} across {p['note_span']} with {p['accuracy_pct']:.0f}% accuracy. "
+                f"Tone showed {res_word} with {tail_word} through the note release."
+            )
+            highlights.append({
+                "timestamp": p["timestamp"],
+                "note_span": p["note_span"],
+                "accuracy_pct": round(p["accuracy_pct"], 1),
+                "cents_drift": round(p["median_cents"], 1),
+                "tail_sag_cents": round(p["tail_sag_cents"], 1),
+                "detail": detail
+            })
+
+        # Sort candidate struggles (avoiding duplicate highlight timestamps if more exist)
+        highlight_ts = {h["timestamp"] for h in highlights}
+        struggle_pool = [p for p in phrase_metrics if p["timestamp"] not in highlight_ts]
+        if not struggle_pool:
+            struggle_pool = phrase_metrics
+
+        struggle_cands = sorted(
+            struggle_pool,
+            key=lambda p: (
+                ((100.0 - p["accuracy_pct"]) * 0.8) +
+                (abs(p["median_cents"]) * 0.7) +
+                (max(0.0, -p["tail_sag_cents"]) * 0.9)
+            ),
+            reverse=True
+        )
+
+        struggles = []
+        for p in struggle_cands[:2]:
+            cents_val = p["median_cents"]
+            tail_val = p["tail_sag_cents"]
+            acc = p["accuracy_pct"]
+
+            issues = []
+            cue_parts = []
+
+            if tail_val <= -26.0:
+                issues.append(f"early breath release caused a trailing pitch sag of {abs(int(tail_val))}¢ on phrase tail")
+                cue_parts.append("Maintain expanded lower ribcage pressure all the way through the final consonant release")
+
+            if cents_val <= -18.0:
+                issues.append(f"pitch drifted {abs(int(cents_val))}¢ flat approaching your upper register ceiling ({p['note_span']})")
+                cue_parts.append("Lift your soft palate (think of beginning a warm yawn) and anchor breath from your lower abdomen before ascending")
+            elif cents_val >= 22.0:
+                issues.append(f"vocal energy pushed {int(cents_val)}¢ sharp ({p['note_span']})")
+                cue_parts.append("Ease off throat tension; let acoustic mask resonance carry your volume rather than muscular cord pressure")
+            elif acc < 72.0:
+                issues.append(f"pitch accuracy dropped to {acc:.0f}% with vowel drift across {p['note_span']}")
+                cue_parts.append("Focus on locking your tongue position steady on sustained vowels")
+
+            if not issues:
+                issues.append(f"minor intonation drift ({cents_val:+0.1f}¢) across {p['note_span']}")
+                cue_parts.append("Keep steady diaphragmatic airflow through melodic transitions")
+
+            detail = (
+                f"During this passage ({p['note_span']}), " + "; ".join(issues) + "."
+            )
+            cue = ". ".join(cue_parts) + "."
+
+            struggles.append({
+                "timestamp": p["timestamp"],
+                "note_span": p["note_span"],
+                "accuracy_pct": round(p["accuracy_pct"], 1),
+                "cents_drift": round(p["median_cents"], 1),
+                "tail_sag_cents": round(p["tail_sag_cents"], 1),
+                "detail": detail,
+                "cue": cue
+            })
+
+        return highlights, struggles
 
     def _analyze_vibrato(
         self, pitches: np.ndarray, hop_ms: float = 15.0
@@ -610,3 +943,148 @@ class VocalTakeAnalyzer:
             verdict = "Balanced Clean Onsets"
 
         return verdict, balanced_pct
+
+    def _analyze_dynamics(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Measures dynamic compression & volume consistency across phrases.
+        Detects sudden volume surges vs fading projection.
+        """
+        hop_size = int(sr * (hop_ms / 1000.0))
+        frame_size = int(sr * 0.040)
+
+        voiced_rms = []
+        for i, p in enumerate(pitches):
+            if p > 0:
+                start = i * hop_size
+                end = start + frame_size
+                if end <= len(audio):
+                    chunk = audio[start:end]
+                    rms = float(np.sqrt(np.mean(chunk ** 2))) + 1e-7
+                    voiced_rms.append(rms)
+
+        if len(voiced_rms) < 10:
+            return 80.0, "Even & Controlled Dynamics"
+
+        v_rms = np.array(voiced_rms)
+        db_vals = 20.0 * np.log10(v_rms)
+
+        std_db = float(np.std(db_vals))
+        med_rms = float(np.median(v_rms))
+
+        surge_ratio = float(np.sum(v_rms > (med_rms * 2.8)) / len(v_rms))
+        steadiness_pct = max(20.0, min(100.0, 100.0 - (std_db * 4.0)))
+
+        if surge_ratio > 0.08:
+            verdict = "Sudden Volume Spikes"
+        elif std_db > 8.0:
+            verdict = "Fading Projection"
+        else:
+            verdict = "Even & Controlled Dynamics"
+
+        return steadiness_pct, verdict
+
+    def _analyze_sibilance(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Analyzes consonant crispness vs harsh sibilance (5 - 8 kHz friction).
+        High energy in 5-8kHz indicates piercing 's'/'t', while too little indicates muddy diction.
+        """
+        hop_size = int(sr * (hop_ms / 1000.0))
+        frame_size = int(sr * 0.040)
+        window = np.hanning(frame_size)
+
+        consonant_frames = []
+        for i in range(1, len(pitches) - 1):
+            if (pitches[i] == 0 and (pitches[i-1] > 0 or pitches[i+1] > 0)) or \
+               (pitches[i] > 0 and (pitches[i-1] == 0 or pitches[i+1] == 0)):
+                start = i * hop_size
+                end = start + frame_size
+                if end <= len(audio):
+                    consonant_frames.append(audio[start:end])
+
+        if not consonant_frames:
+            return 0.15, "Crisp & Articulate"
+
+        sample_frames = consonant_frames[:400]
+        windowed = np.array(sample_frames) * window
+        spectra = np.abs(np.fft.rfft(windowed, axis=1)) ** 2
+        avg_spectrum = np.mean(spectra, axis=0)
+        freqs = np.fft.rfftfreq(frame_size, 1.0 / sr)
+
+        sib_band = (freqs >= 5000) & (freqs <= 8000)
+        core_band = (freqs >= 300) & (freqs <= 3000)
+
+        p_sib = np.sum(avg_spectrum[sib_band])
+        p_core = np.sum(avg_spectrum[core_band])
+        ratio = float(p_sib / (p_core + 1e-9))
+
+        if ratio > 0.38:
+            verdict = "Harsh Sibilance ('S'/'T' Peaks)"
+        elif ratio < 0.05:
+            verdict = "Muddy / Swallowed Diction"
+        else:
+            verdict = "Crisp & Articulate"
+
+        return ratio, verdict
+
+    def _analyze_vocal_fry(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Detects vocal fry / creakiness (aperiodic low-frequency sub-harmonics 20 - 65 Hz).
+        Useful to distinguish stylistic low creak from cord fatigue / pitch collapse.
+        """
+        hop_size = int(sr * (hop_ms / 1000.0))
+        frame_size = int(sr * 0.050)
+
+        fry_frames = 0
+        total_eval_frames = 0
+
+        for i, p in enumerate(pitches):
+            if 0 < p < 130.0 or (p == 0 and i > 0 and pitches[i-1] > 0):
+                start = i * hop_size
+                end = start + frame_size
+                if end <= len(audio):
+                    chunk = audio[start:end]
+                    rms = np.sqrt(np.mean(chunk ** 2))
+                    if rms > 0.02:
+                        total_eval_frames += 1
+                        corr = np.correlate(chunk, chunk, mode="full")
+                        corr = corr[len(chunk) - 1 :]
+                        if corr[0] > 1e-6:
+                            norm_corr = corr / corr[0]
+                            min_lag = int(sr / 65.0)
+                            max_lag = min(len(norm_corr) - 1, int(sr / 20.0))
+                            if min_lag < max_lag:
+                                peak_val = np.max(norm_corr[min_lag:max_lag])
+                                if peak_val >= 0.35:
+                                    fry_frames += 1
+
+        if total_eval_frames == 0:
+            return 0.0, "Clean Core Phonation"
+
+        fry_pct = (fry_frames / total_eval_frames) * 100.0
+
+        if fry_pct >= 30.0:
+            verdict = "Heavy Vocal Fry / Cord Fatigue"
+        elif fry_pct >= 8.0:
+            verdict = f"Stylistic Creak (<{int(round(fry_pct))}%)"
+        else:
+            verdict = "Clean Core Phonation"
+
+        return fry_pct, verdict
