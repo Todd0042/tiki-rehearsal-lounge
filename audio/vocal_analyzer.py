@@ -54,6 +54,18 @@ class TakeAnalysisReport:
     recommended_key_shift: int      # [-3, +3] semitones
     key_recommendation_reason: str
 
+    # Advanced Vocal Resonance & Formants (Singer's Formant 2.8 - 3.4 kHz)
+    resonance_verdict: str          # "Rich / Piercing Ring", "Warm & Balanced", "Soft / Dark Timbre"
+    singers_formant_ratio: float    # Ratio of 2.5-3.5kHz energy to 1.0-2.0kHz energy
+
+    # Breath Support & Phrase-End Decay
+    breath_support_pct: float       # Percentage of phrase tails holding stable pitch without droop (0 - 100%)
+    breath_support_verdict: str     # "Rock Solid (Diaphragmatic)", "Good Stability", "Pitch Droop on Tails"
+
+    # Onset & Glottal Dynamics
+    onset_attack_verdict: str       # "Balanced Clean Onsets", "Hard Glottal Punches", "Airy / Breathy Entries"
+    balanced_onsets_pct: float      # % of vocal entries with balanced dynamics
+
     # Overall Score & Feedback
     overall_score: int              # 0 - 100
     coach_feedback: List[str]
@@ -181,6 +193,12 @@ class VocalTakeAnalyzer:
                 current_key_shift=key_shift,
                 recommended_key_shift=0,
                 key_recommendation_reason="Please sing closer to the microphone or verify input levels.",
+                resonance_verdict="N/A",
+                singers_formant_ratio=0.0,
+                breath_support_pct=0.0,
+                breath_support_verdict="N/A",
+                onset_attack_verdict="N/A",
+                balanced_onsets_pct=0.0,
                 overall_score=0,
                 coach_feedback=["No sustained vocal audio was detected in this take."]
             )
@@ -224,23 +242,41 @@ class VocalTakeAnalyzer:
         # 2. Vibrato Analysis
         vib_rate, vib_depth, vib_present = self._analyze_vibrato(s_pitches, hop_ms=15.0)
 
-        # 3. Smart Key Recommendation
+        # 3. Formant & Vocal Resonance (Singer's Formant 2.8 - 3.4 kHz)
+        sf_ratio, resonance_verdict = self._analyze_resonance(singer_audio, sr, s_pitches, hop_ms=15.0)
+
+        # 4. Breath Support & Phrase-End Decay Stability
+        breath_pct, breath_verdict = self._analyze_breath_support(s_pitches, hop_ms=15.0)
+
+        # 5. Glottal Attack Dynamics
+        attack_verdict, balanced_onsets_pct = self._analyze_glottal_attacks(singer_audio, sr, s_pitches, hop_ms=15.0)
+
+        # 6. Smart Key Recommendation
         rec_shift, rec_reason = self.recommend_key_for_track({
             "min_hz": take_min_hz,
             "max_hz": take_max_hz
         })
 
-        # 4. Overall Score calculation (0 - 100)
-        # Weighted: 60% pitch accuracy, 20% intonation stability, 20% rhythm pocket
-        intonation_penalty = min(25.0, abs(intonation))
+        # 7. Overall Score calculation (0 - 100)
+        # 50% pitch accuracy, 15% intonation, 15% rhythm, 10% breath support, 10% balanced onsets
+        intonation_penalty = min(20.0, abs(intonation))
         rhythm_penalty = min(20.0, abs(rhythm_ms) / 10.0)
 
-        score = (pitch_acc * 0.60) + (max(0.0, 20.0 - intonation_penalty)) + (max(0.0, 20.0 - rhythm_penalty))
+        score = (
+            (pitch_acc * 0.50) +
+            (max(0.0, 15.0 - (intonation_penalty * 0.75))) +
+            (max(0.0, 15.0 - (rhythm_penalty * 0.75))) +
+            (breath_pct * 0.10) +
+            (balanced_onsets_pct * 0.10)
+        )
         if vib_present:
-            score = min(100.0, score + 5.0)  # Bonus for natural expressive vibrato
+            score = min(100.0, score + 4.0)  # Bonus for natural expressive vibrato
+        if sf_ratio >= 0.45:
+            score = min(100.0, score + 3.0)  # Bonus for resonant acoustic projection
+
         overall_score = int(round(max(10.0, min(100.0, score))))
 
-        # 5. Coach Feedback Generation
+        # 8. Pedagogical Coach Feedback Generation
         feedback = []
         if pitch_acc >= 85.0:
             feedback.append("Superb pitch accuracy! You stayed locked into the melodic center.")
@@ -260,6 +296,23 @@ class VocalTakeAnalyzer:
         else:
             feedback.append("Vocals were mostly straight-tone; experiment with gentle vibrato at line ends.")
 
+        if breath_pct < 65.0:
+            feedback.append("Line ends show pitch droop; maintain firm diaphragmatic breath support until vowel completion.")
+        elif breath_pct >= 85.0:
+            feedback.append("Stellar breath support! Phrase tails maintained rock-solid pitch and steady tone decay.")
+
+        if "Hard Glottal" in attack_verdict:
+            feedback.append("Detected hard glottal punches on vowel entries. Ease in with a gentle sigh to protect your cords.")
+        elif "Airy" in attack_verdict:
+            feedback.append("Onsets are airy; engage your vocal cords crisply at phrase starts for cleaner punch.")
+        else:
+            feedback.append("Clean, balanced vocal onsets without glottal strain.")
+
+        if sf_ratio >= 0.45:
+            feedback.append("Strong singer's formant ring (2.8–3.4 kHz) — excellent acoustic clarity and projection.")
+        elif sf_ratio < 0.28:
+            feedback.append("Tone is somewhat muffled. Focus on forward mask placement and a lifted soft palate.")
+
         return TakeAnalysisReport(
             pitch_accuracy_pct=round(pitch_acc, 1),
             intonation_cents=round(intonation, 1),
@@ -275,6 +328,12 @@ class VocalTakeAnalyzer:
             current_key_shift=key_shift,
             recommended_key_shift=rec_shift,
             key_recommendation_reason=rec_reason,
+            resonance_verdict=resonance_verdict,
+            singers_formant_ratio=round(sf_ratio, 3),
+            breath_support_pct=round(breath_pct, 1),
+            breath_support_verdict=breath_verdict,
+            onset_attack_verdict=attack_verdict,
+            balanced_onsets_pct=round(balanced_onsets_pct, 1),
             overall_score=overall_score,
             coach_feedback=feedback
         )
@@ -403,3 +462,151 @@ class VocalTakeAnalyzer:
             return float(np.mean(rates)), float(np.mean(depths)), True
 
         return 0.0, 0.0, False
+
+    def _analyze_resonance(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Calculates Singer's Formant power ratio (2.5 - 3.5 kHz vs 1.0 - 2.0 kHz).
+        Trained singers cluster acoustic energy in this window to pierce through music.
+        """
+        hop_size = int(sr * (hop_ms / 1000.0))
+        frame_size = int(sr * 0.040)  # 40ms analysis window
+        window = np.hanning(frame_size)
+
+        voiced_audio = []
+        for i, p in enumerate(pitches):
+            if p > 0:
+                start = i * hop_size
+                end = start + frame_size
+                if end <= len(audio):
+                    voiced_audio.append(audio[start:end])
+
+        if not voiced_audio:
+            return 0.0, "N/A"
+
+        # Limit to first 600 voiced frames (~9s) to keep CPU lightning fast
+        sample_frames = voiced_audio[:600]
+        windowed = np.array(sample_frames) * window
+        spectra = np.abs(np.fft.rfft(windowed, axis=1)) ** 2
+        avg_spectrum = np.mean(spectra, axis=0)
+        freqs = np.fft.rfftfreq(frame_size, 1.0 / sr)
+
+        sf_band = (freqs >= 2500) & (freqs <= 3500)
+        mid_band = (freqs >= 1000) & (freqs <= 2000)
+
+        p_sf = np.sum(avg_spectrum[sf_band])
+        p_mid = np.sum(avg_spectrum[mid_band])
+        ratio = float(p_sf / (p_mid + 1e-9))
+
+        if ratio >= 0.50:
+            verdict = "Rich / Piercing Ring"
+        elif ratio >= 0.28:
+            verdict = "Warm & Balanced Tone"
+        else:
+            verdict = "Soft / Dark Timbre"
+
+        return ratio, verdict
+
+    def _analyze_breath_support(
+        self,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Measures phrase-end decay stability. Poor breath support causes pitch
+        to sag downwards (droop > 25-30 cents) on the trailing end of notes.
+        """
+        phrases = []
+        current = []
+        for p in pitches:
+            if p > 0:
+                current.append(p)
+            else:
+                if len(current) >= 12:  # at least ~180ms
+                    phrases.append(np.array(current))
+                current = []
+        if len(current) >= 12:
+            phrases.append(np.array(current))
+
+        if not phrases:
+            return 0.0, "N/A"
+
+        stable_tails = 0
+        for phr in phrases:
+            phrase_mid = float(np.median(phr))
+            tail_slice = phr[-min(8, len(phr)):]
+            tail_mid = float(np.median(tail_slice))
+            if phrase_mid > 0 and tail_mid > 0:
+                delta_cents = 1200.0 * np.log2(tail_mid / phrase_mid)
+                # If tail pitch drops more than 30 cents, singer dropped support
+                if delta_cents >= -30.0:
+                    stable_tails += 1
+            else:
+                stable_tails += 1
+
+        stability_pct = (stable_tails / len(phrases)) * 100.0
+
+        if stability_pct >= 82.0:
+            verdict = "Rock Solid (Diaphragmatic)"
+        elif stability_pct >= 62.0:
+            verdict = "Good Stability (Minor Tail Sag)"
+        else:
+            verdict = "Pitch Droop on Line Ends"
+
+        return stability_pct, verdict
+
+    def _analyze_glottal_attacks(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[str, float]:
+        """
+        Analyzes note onset dynamics (the first 35ms of vocal entries):
+        - Hard glottal punch: sudden explosive energy spike (crest factor > 4.2).
+        - Breathy onset: slow rise time, low peak-to-RMS ratio.
+        - Balanced onset: clean, controlled entry without vocal cord slamming.
+        """
+        hop_size = int(sr * (hop_ms / 1000.0))
+        onsets = []
+
+        # Find voiced phrase starts
+        for i in range(1, len(pitches)):
+            if pitches[i] > 0 and pitches[i - 1] == 0:
+                # Check that this is a real note (lasts at least 6 frames ~90ms)
+                if i + 6 < len(pitches) and np.all(pitches[i:i+6] > 0):
+                    sample_pos = i * hop_size
+                    w_start = max(0, sample_pos - int(sr * 0.005))
+                    w_end = min(len(audio), sample_pos + int(sr * 0.035))
+                    chunk = audio[w_start:w_end]
+                    if len(chunk) > 100:
+                        rms = float(np.sqrt(np.mean(chunk ** 2))) + 1e-7
+                        peak = float(np.max(np.abs(chunk)))
+                        crest = peak / rms
+                        onsets.append(crest)
+
+        if not onsets:
+            return "Balanced Clean Onsets", 100.0
+
+        hard_count = sum(1 for c in onsets if c > 4.2)
+        breathy_count = sum(1 for c in onsets if c < 2.1)
+        balanced_count = len(onsets) - hard_count - breathy_count
+
+        balanced_pct = (balanced_count / len(onsets)) * 100.0
+        hard_pct = (hard_count / len(onsets)) * 100.0
+        breathy_pct = (breathy_count / len(onsets)) * 100.0
+
+        if hard_pct > 30.0:
+            verdict = f"Hard Glottal Punches ({int(round(hard_pct))}% punch)"
+        elif breathy_pct > 35.0:
+            verdict = f"Airy / Breathy Entries ({int(round(breathy_pct))}% airy)"
+        else:
+            verdict = "Balanced Clean Onsets"
+
+        return verdict, balanced_pct

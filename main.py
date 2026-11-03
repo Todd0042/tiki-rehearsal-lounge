@@ -269,6 +269,9 @@ def run_cli_cockpit():
             print(f"  • Rhythm Offset:      {report.rhythm_offset_ms:+0.1f}ms ({report.rhythm_verdict})")
             vib_str = f"{report.vibrato_rate_hz:.1f} Hz (depth ±{report.vibrato_depth_cents:.0f}¢)" if report.vibrato_present else "Straight tone"
             print(f"  • Vibrato Dynamics:   {vib_str}")
+            print(f"  • Vocal Resonance:    {report.resonance_verdict} (ratio: {report.singers_formant_ratio:.3f})")
+            print(f"  • Breath Support:     {report.breath_support_pct:.1f}% ({report.breath_support_verdict})")
+            print(f"  • Glottal Attacks:    {report.onset_attack_verdict} ({report.balanced_onsets_pct:.1f}% balanced)")
             print(f"  • Coach Feedback:")
             for note in report.coach_feedback:
                 print(f"    - {note}")

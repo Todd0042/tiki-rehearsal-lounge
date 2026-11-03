@@ -46,7 +46,12 @@ from config import (
 )
 from db.bridge import TikiDatabaseBridge
 from audio.recorder import AudioRecorder
-from audio.calibration import VocalCalibrationManager, VocalProfile
+from audio.calibration import (
+    VocalCalibrationManager,
+    VocalProfile,
+    hz_to_midi,
+    midi_to_note_name
+)
 from audio.player import RehearsalPlayer
 from audio.vocal_analyzer import VocalTakeAnalyzer, TakeAnalysisReport
 from downloader import TrackDownloader
@@ -68,7 +73,10 @@ class StudioCockpitWindow:
         self.calibrator = VocalCalibrationManager()
         self.vocal_profile: Optional[VocalProfile] = self.calibrator.load_profile()
         self.analyzer = VocalTakeAnalyzer(vocal_profile=self.vocal_profile)
-        self.recorder = AudioRecorder(on_level=self._on_mic_level)
+        self.recorder = AudioRecorder(
+            on_level=self._on_mic_level,
+            on_pitch=self._on_mic_pitch
+        )
         self.player = RehearsalPlayer(on_finished=self._on_playback_ended)
         self.downloader = TrackDownloader(db_bridge=self.db)
 
@@ -79,6 +87,8 @@ class StudioCockpitWindow:
         self.is_rehearsing: bool = False
         self.is_calibrating: bool = False
         self._calib_stop_requested: bool = False
+        self._pitch_history: List[float] = []
+        self._last_pitch_hz: float = 0.0
 
         # Build UI
         self._setup_styles()
@@ -356,6 +366,38 @@ class StudioCockpitWindow:
         )
         self.vu_canvas.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
+        # Live Pitch Trace Canvas
+        trace_header = tk.Frame(transport_card, bg=COLOR_BG_CARD)
+        trace_header.pack(fill="x", pady=(10, 2))
+
+        tk.Label(
+            trace_header,
+            text="LIVE PITCH TRACE:",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_CYAN,
+            bg=COLOR_BG_CARD
+        ).pack(side="left")
+
+        self.lbl_live_pitch = tk.Label(
+            trace_header,
+            text="Standby",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_BG_CARD
+        )
+        self.lbl_live_pitch.pack(side="right")
+
+        self.pitch_canvas = tk.Canvas(
+            transport_card,
+            bg="#0d0814",
+            height=120,
+            bd=1,
+            relief="solid",
+            highlightthickness=0
+        )
+        self.pitch_canvas.pack(fill="x", pady=(2, 0))
+        self.pitch_canvas.bind("<Configure>", lambda e: self._draw_pitch_trace())
+
         # Right Panel: Post-Take Performance Report Card
         right_panel = tk.Frame(parent, bg=COLOR_BG_MAIN)
         right_panel.pack(side="right", fill="both", expand=True, pady=8)
@@ -430,6 +472,14 @@ class StudioCockpitWindow:
         self.tile_vib = self._create_metric_tile(grid_frame, "Vibrato Dynamics", "-- Hz", "Modulation rate")
         self.tile_vib.grid(row=1, column=1, padx=6, pady=6, sticky="nsew")
 
+        # Tile 5: Resonance Ring (Singer's Formant 2.8 - 3.4 kHz)
+        self.tile_res = self._create_metric_tile(grid_frame, "Resonance Ring", "--", "Singer's formant ratio")
+        self.tile_res.grid(row=2, column=0, padx=6, pady=6, sticky="nsew")
+
+        # Tile 6: Breath Support Stability
+        self.tile_breath = self._create_metric_tile(grid_frame, "Breath Support", "-- %", "Phrase-end stability")
+        self.tile_breath.grid(row=2, column=1, padx=6, pady=6, sticky="nsew")
+
         grid_frame.columnconfigure(0, weight=1)
         grid_frame.columnconfigure(1, weight=1)
 
@@ -461,7 +511,7 @@ class StudioCockpitWindow:
         self.lbl_coach_empty.pack(fill="x", padx=4, pady=6)
 
         def _on_resize_notes(event):
-            wrap = max(300, event.width - 40)
+            wrap = max(260, event.width - 60)
             if hasattr(self, "lbl_coach_empty") and self.lbl_coach_empty.winfo_exists():
                 self.lbl_coach_empty.config(wraplength=wrap)
             for widget in self.coach_feedback_container.winfo_children():
@@ -753,6 +803,105 @@ class StudioCockpitWindow:
         if self.root:
             self.root.after_idle(_update)
 
+    def _on_mic_pitch(self, hz: float):
+        """Updates live scrolling pitch trace on main thread."""
+        self._pitch_history.append(hz)
+        if len(self._pitch_history) > 60:
+            self._pitch_history.pop(0)
+        self._last_pitch_hz = hz
+
+        if self.root:
+            self.root.after_idle(self._draw_pitch_trace)
+
+    def _draw_pitch_trace(self):
+        if not hasattr(self, "pitch_canvas") or not self.pitch_canvas.winfo_exists():
+            return
+
+        w = self.pitch_canvas.winfo_width()
+        h = self.pitch_canvas.winfo_height()
+        if w <= 10 or h <= 10:
+            return
+
+        self.pitch_canvas.delete("all")
+
+        # Range boundaries (MIDI 36 = C2 ~65Hz, MIDI 72 = C5 ~523Hz)
+        min_midi = 36.0
+        max_midi = 72.0
+        midi_span = max_midi - min_midi
+
+        # Note reference lines to draw
+        guidelines = [
+            (36, "C2"), (43, "G2"), (48, "C3"), (55, "G3"), (60, "C4"), (67, "G4"), (72, "C5")
+        ]
+
+        for m_val, m_name in guidelines:
+            y = h - int(((m_val - min_midi) / midi_span) * (h - 20)) - 10
+            if 0 <= y <= h:
+                self.pitch_canvas.create_line(30, y, w, y, fill="#1e132c", dash=(2, 4))
+                self.pitch_canvas.create_text(
+                    16, y, text=m_name, font=("Helvetica", 7), fill="#6c5688", anchor="center"
+                )
+
+        if not self.is_rehearsing or not self._pitch_history:
+            self.pitch_canvas.create_text(
+                w / 2, h / 2,
+                text="Live Pitch Monitor (Active during rehearsal take)",
+                font=("Helvetica", 9),
+                fill="#4a3760"
+            )
+            return
+
+        # Plot pitch history points
+        pts = self._pitch_history
+        n = len(pts)
+        if n < 1:
+            return
+
+        coords = []
+        step_x = (w - 38) / max(1, 60 - 1)
+        start_x = 34
+
+        for idx, hz in enumerate(pts):
+            x = start_x + (idx * step_x)
+            if hz > 0:
+                m = hz_to_midi(hz)
+                clamped_m = max(min_midi, min(max_midi, m))
+                y = h - int(((clamped_m - min_midi) / midi_span) * (h - 20)) - 10
+                coords.append((x, y, hz, m))
+            else:
+                coords.append((x, None, 0.0, 0.0))
+
+        # Draw lines between consecutive voiced points
+        for i in range(len(coords) - 1):
+            x1, y1, hz1, _ = coords[i]
+            x2, y2, hz2, _ = coords[i + 1]
+            if y1 is not None and y2 is not None:
+                self.pitch_canvas.create_line(x1, y1, x2, y2, fill=COLOR_CYAN, width=2)
+
+        # Draw current leading point
+        last_x, last_y, last_hz, last_m = coords[-1]
+        if last_y is not None and last_hz > 0:
+            target_midi = round(last_m)
+            cents_err = (last_m - target_midi) * 100.0
+            note_name = midi_to_note_name(last_m)
+
+            if abs(cents_err) <= 28.0:
+                # Locked in tune! Neon Lime glow
+                self.pitch_canvas.create_oval(last_x - 6, last_y - 6, last_x + 6, last_y + 6, fill="", outline=COLOR_LIME, width=2)
+                self.pitch_canvas.create_oval(last_x - 3, last_y - 3, last_x + 3, last_y + 3, fill=COLOR_LIME, outline="")
+                self.lbl_live_pitch.config(
+                    text=f"✦ {note_name} ({last_hz:.1f} Hz) LOCKED IN ✦",
+                    fg=COLOR_LIME
+                )
+            else:
+                self.pitch_canvas.create_oval(last_x - 4, last_y - 4, last_x + 4, last_y + 4, fill=COLOR_CYAN, outline="")
+                self.lbl_live_pitch.config(
+                    text=f"{note_name} ({last_hz:.1f} Hz) {cents_err:+0.0f}¢",
+                    fg=COLOR_CYAN
+                )
+        else:
+            self.lbl_live_pitch.config(text="Unvoiced", fg=COLOR_TEXT_MUTED)
+
     def _on_key_down(self):
         if self.current_key_shift > -3:
             self.current_key_shift -= 1
@@ -805,6 +954,8 @@ class StudioCockpitWindow:
         self.is_rehearsing = True
         self.btn_record_take.config(text="⏹️ STOP REHEARSAL TAKE", bg=COLOR_DANGER)
         self.lbl_status.config(text="Rehearsing take... Playback and mic recording active.")
+        self._pitch_history.clear()
+        self._draw_pitch_trace()
 
         # Prepare take file
         timestamp = int(time.time())
@@ -821,6 +972,8 @@ class StudioCockpitWindow:
         self.is_rehearsing = False
         self.btn_record_take.config(text="🎤 START REHEARSAL TAKE", bg=COLOR_MAGENTA)
         self.lbl_status.config(text="Finalizing take and calculating vocal report card...")
+        self.lbl_live_pitch.config(text="Take Completed", fg=COLOR_GOLD)
+        self._draw_pitch_trace()
 
         # Stop player & recorder
         self.player.stop()
@@ -866,12 +1019,16 @@ class StudioCockpitWindow:
         self.tile_into._val_lbl.config(text=f"{report.intonation_cents:+0.1f}¢")
         self.tile_rhythm._val_lbl.config(text=f"{report.rhythm_offset_ms:+0.1f}ms")
         self.tile_vib._val_lbl.config(text=f"{report.vibrato_rate_hz:0.1f} Hz" if report.vibrato_present else "Straight")
+        self.tile_res._val_lbl.config(text=f"{report.singers_formant_ratio:.2f}")
+        self.tile_res._sub_lbl.config(text=report.resonance_verdict)
+        self.tile_breath._val_lbl.config(text=f"{report.breath_support_pct:.0f}%")
+        self.tile_breath._sub_lbl.config(text=report.breath_support_verdict)
 
         # Clear previous feedback items
         for child in self.coach_feedback_container.winfo_children():
             child.destroy()
 
-        avail_wrap = max(280, self.notes_frame.winfo_width() - 44)
+        avail_wrap = max(260, self.notes_frame.winfo_width() - 60)
 
         # 1. Add feedback rows
         for note in report.coach_feedback:

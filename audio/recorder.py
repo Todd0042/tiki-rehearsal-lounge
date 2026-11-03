@@ -25,11 +25,13 @@ class AudioRecorder:
         self,
         sample_rate: int = 44100,
         channels: int = 1,
-        on_level: Optional[Callable[[float, float], None]] = None  # (rms, peak) normalized 0.0 - 1.0
+        on_level: Optional[Callable[[float, float], None]] = None,  # (rms, peak) normalized 0.0 - 1.0
+        on_pitch: Optional[Callable[[float], None]] = None          # live fundamental frequency in Hz (0.0 = unvoiced)
     ):
         self.sample_rate = sample_rate
         self.channels = channels
         self.on_level = on_level
+        self.on_pitch = on_pitch
 
         self._process: Optional[subprocess.Popen] = None
         self._record_thread: Optional[threading.Thread] = None
@@ -177,18 +179,53 @@ class AudioRecorder:
                     wav_file.writeframes(raw_data)
 
                     # Compute live RMS & Peak for VU meter
+                    rms, peak = 0.0, 0.0
                     if self.on_level:
                         rms, peak = self._calculate_levels(raw_data)
                         try:
                             self.on_level(rms, peak)
                         except Exception:
                             pass
+
+                    # Compute live pitch if listener is registered
+                    if self.on_pitch:
+                        if rms < 0.02:
+                            try:
+                                self.on_pitch(0.0)
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                import numpy as np
+                                shorts = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+                                # Quick autocorrelation
+                                corr = np.correlate(shorts, shorts, mode="full")
+                                corr = corr[len(shorts) - 1 :]
+                                if corr[0] > 1e-5:
+                                    norm_corr = corr / corr[0]
+                                    min_lag = int(self.sample_rate / 650.0)  # max 650 Hz
+                                    max_lag = int(self.sample_rate / 65.0)   # min 65 Hz
+                                    max_lag = min(max_lag, len(norm_corr) - 2)
+                                    if min_lag < max_lag:
+                                        peak_idx = np.argmax(norm_corr[min_lag:max_lag]) + min_lag
+                                        if norm_corr[peak_idx] >= 0.35:
+                                            hz = float(self.sample_rate / peak_idx)
+                                            self.on_pitch(hz)
+                                        else:
+                                            self.on_pitch(0.0)
+                            except Exception:
+                                pass
         except Exception as e:
             print(f"[AudioRecorder] Capture worker exception: {e}", file=sys.stderr)
         finally:
             if self.on_level:
                 try:
                     self.on_level(0.0, 0.0)
+                except Exception:
+                    pass
+            if self.on_pitch:
+                try:
+                    self.on_pitch(0.0)
                 except Exception:
                     pass
 
