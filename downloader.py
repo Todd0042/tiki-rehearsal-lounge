@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 
@@ -69,6 +70,69 @@ def sanitize_filename(name: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|]', "", name)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned if cleaned else "unknown"
+
+
+def relocate_and_rename_track_file(
+    curr_local_path: str,
+    new_title: str,
+    new_artist: str,
+    new_is_sing_along: bool,
+    video_id: str = ""
+) -> Optional[Path]:
+    """
+    Renames and relocates a downloaded track file on disk to match Tiki Karaoke's folder hierarchy:
+    - tracks/<Artist>/<Title> [<video_id>].mp4
+    - sing_along/<Artist>/<Title> [<video_id>].mp4
+    """
+    if not curr_local_path:
+        return None
+    old_path = Path(curr_local_path)
+    if not old_path.exists():
+        return None
+
+    base_dir = SING_ALONG_DIR if new_is_sing_along else TRACKS_DIR
+    safe_artist = sanitize_filename(new_artist)
+    safe_title = sanitize_filename(new_title)
+    dest_dir = base_dir / safe_artist
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    suffix = old_path.suffix or ".mp4"
+    if video_id:
+        new_filename = f"{safe_title} [{video_id}]{suffix}"
+    else:
+        new_filename = f"{safe_title}{suffix}"
+
+    dest_path = dest_dir / new_filename
+
+    # If the file path is already the destination, return as is
+    if dest_path.resolve() == old_path.resolve():
+        return dest_path
+
+    # If destination file already exists and is different, prevent accidental clobbering
+    if dest_path.exists() and dest_path != old_path:
+        new_filename = f"{safe_title}_{int(time.time())} [{video_id}]{suffix}" if video_id else f"{safe_title}_{int(time.time())}{suffix}"
+        dest_path = dest_dir / new_filename
+
+    shutil.move(str(old_path), str(dest_path))
+
+    # Also move accompanying CDG file if it exists (for CD+G tracks)
+    old_cdg = old_path.with_suffix(".cdg")
+    if old_cdg.exists():
+        dest_cdg = dest_path.with_suffix(".cdg")
+        try:
+            shutil.move(str(old_cdg), str(dest_cdg))
+        except Exception:
+            pass
+
+    # Clean up old artist directory if empty
+    try:
+        old_parent = old_path.parent
+        if old_parent != base_dir and old_parent.is_dir() and not any(old_parent.iterdir()):
+            old_parent.rmdir()
+    except Exception:
+        pass
+
+    return dest_path
 
 
 def parse_artist_title(raw_title: str) -> tuple[str, str]:

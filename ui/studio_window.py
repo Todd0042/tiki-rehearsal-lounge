@@ -67,7 +67,7 @@ from audio.tone_generator import (
     clamp_note_to_range,
     note_name_to_midi
 )
-from downloader import TrackDownloader
+from downloader import TrackDownloader, relocate_and_rename_track_file
 from ai.offline_coach import OfflineVocalCoach, AVAILABLE_MODELS
 
 
@@ -1138,6 +1138,20 @@ class StudioCockpitWindow:
 
         self.tree_tracks.bind("<Double-1>", lambda e: self._on_select_track())
 
+        # Context Menu (Right Click)
+        self.track_menu = tk.Menu(self.root, tearoff=0, bg="#1a1025", fg="#ffffff", activebackground="#3a1859", activeforeground=COLOR_CYAN)
+        self.track_menu.add_command(label="➔ Load into Rehearsal Cockpit", command=self._on_select_track)
+        self.track_menu.add_command(label="✏️ Edit Track Details...", command=self._on_edit_selected_track_metadata)
+        self.track_menu.add_command(label="⬇️ Download to Library", command=self._on_download_selected_track)
+
+        def _on_track_right_click(event):
+            row_id = self.tree_tracks.identify_row(event.y)
+            if row_id:
+                self.tree_tracks.selection_set(row_id)
+                self.track_menu.tk_popup(event.x_root, event.y_root)
+
+        self.tree_tracks.bind("<Button-3>", _on_track_right_click)
+
         # Select & Download Button Bar
         btn_bar = tk.Frame(parent, bg=COLOR_BG_MAIN)
         btn_bar.pack(fill="x", padx=12, pady=(4, 12))
@@ -1171,6 +1185,22 @@ class StudioCockpitWindow:
             command=self._on_select_track
         )
         btn_select.pack(side="right")
+
+        self.btn_edit_metadata = tk.Button(
+            btn_bar,
+            text="✏️ Edit Track Details",
+            bg="#25123d",
+            fg=COLOR_GOLD,
+            activebackground="#45186b",
+            activeforeground="#ffffff",
+            font=("Helvetica", 10, "bold"),
+            bd=1,
+            relief="solid",
+            padx=14,
+            pady=8,
+            command=self._on_edit_selected_track_metadata
+        )
+        self.btn_edit_metadata.pack(side="right", padx=(0, 8))
 
         self.btn_download_track = tk.Button(
             btn_bar,
@@ -2617,6 +2647,272 @@ class StudioCockpitWindow:
                         self._start_track_download(vid, item_id, auto_load=True, existing_track=track)
             except Exception:
                 pass
+
+    def _on_edit_selected_track_metadata(self):
+        """Validates selection and opens the track metadata editor dialog."""
+        selected = self.tree_tracks.selection()
+        if not selected:
+            messagebox.showinfo("Select Track", "Please select a downloaded track from the library to edit.")
+            return
+
+        item_id = selected[0]
+        item_vals = self.tree_tracks.item(item_id, "values")
+        raw_id = item_vals[0]
+
+        if str(raw_id).upper() == "YT":
+            messagebox.showinfo(
+                "Downloaded Tracks Only",
+                "Only downloaded tracks in your offline library can be edited.\n\nDownload this song first to customize its artist, title, or song type."
+            )
+            return
+
+        try:
+            track_id = int(raw_id)
+        except (ValueError, TypeError):
+            messagebox.showinfo("Invalid Selection", "Selected item is not a valid library track.")
+            return
+
+        track = self.db.get_track_by_id(track_id)
+        if not track or not track.get("is_downloaded"):
+            messagebox.showinfo(
+                "Downloaded Tracks Only",
+                "Only downloaded tracks in your offline library can be edited."
+            )
+            return
+
+        self._show_edit_metadata_dialog(item_id, track)
+
+    def _show_edit_metadata_dialog(self, item_id: str, track: Dict[str, Any]):
+        """Renders the Tiki-themed metadata editor modal dialog."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"✏️ Edit Track Details — #{track.get('id')}")
+        dlg.geometry("540x510")
+        dlg.configure(bg=COLOR_BG_MAIN)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Center dialog over main window
+        dlg.update_idletasks()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        dlg.geometry(f"+{rx + max(0, (rw - 540) // 2)}+{ry + max(0, (rh - 510) // 2)}")
+
+        # Header Frame
+        hdr = tk.Frame(dlg, bg="#1a1025", padx=16, pady=12)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr,
+            text="🌺 EDIT TRACK METADATA",
+            font=("Helvetica", 11, "bold"),
+            fg=COLOR_GOLD,
+            bg="#1a1025"
+        ).pack(anchor="w")
+        tk.Label(
+            hdr,
+            text=f"Editing Library Track #{track.get('id')} • Changes sync immediately to database and disk.",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg="#1a1025"
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Main Form Frame
+        form = tk.Frame(dlg, bg=COLOR_BG_MAIN, padx=20, pady=14)
+        form.pack(fill="both", expand=True)
+
+        # 1. Title
+        tk.Label(form, text="SONG TITLE:", font=("Helvetica", 9, "bold"), fg=COLOR_CYAN, bg=COLOR_BG_MAIN).pack(anchor="w", pady=(0, 2))
+        ent_title = tk.Entry(form, font=("Helvetica", 10), bg="#150a22", fg=COLOR_TEXT_MAIN, insertbackground=COLOR_CYAN, bd=1, relief="solid")
+        ent_title.pack(fill="x", pady=(0, 10))
+        ent_title.insert(0, track.get("title", ""))
+
+        # 2. Artist
+        tk.Label(form, text="ARTIST / PERFORMER:", font=("Helvetica", 9, "bold"), fg=COLOR_CYAN, bg=COLOR_BG_MAIN).pack(anchor="w", pady=(0, 2))
+        ent_artist = tk.Entry(form, font=("Helvetica", 10), bg="#150a22", fg=COLOR_TEXT_MAIN, insertbackground=COLOR_CYAN, bd=1, relief="solid")
+        ent_artist.pack(fill="x", pady=(0, 10))
+        ent_artist.insert(0, track.get("artist", ""))
+
+        # 3. Song Type (Karaoke vs Sing-Along)
+        tk.Label(form, text="SONG TYPE / MEDIA SUBTYPE:", font=("Helvetica", 9, "bold"), fg=COLOR_GOLD, bg=COLOR_BG_MAIN).pack(anchor="w", pady=(0, 4))
+        type_frame = tk.Frame(form, bg="#150a22", padx=8, pady=6, bd=1, relief="solid")
+        type_frame.pack(fill="x", pady=(0, 10))
+
+        type_var = tk.IntVar(value=1 if track.get("is_sing_along") else 0)
+        rb_sing = tk.Radiobutton(
+            type_frame,
+            text="🎙️ Sing-Along Guide (With Lead Vocals for Reference)",
+            variable=type_var,
+            value=1,
+            font=("Helvetica", 9),
+            fg=COLOR_CYAN,
+            bg="#150a22",
+            selectcolor="#0d0814",
+            activebackground="#150a22",
+            activeforeground=COLOR_CYAN
+        )
+        rb_sing.pack(anchor="w", pady=2)
+
+        rb_karaoke = tk.Radiobutton(
+            type_frame,
+            text="🎵 Karaoke Backing Track (Instrumental Stems / No Lead Vocals)",
+            variable=type_var,
+            value=0,
+            font=("Helvetica", 9),
+            fg=COLOR_MAGENTA,
+            bg="#150a22",
+            selectcolor="#0d0814",
+            activebackground="#150a22",
+            activeforeground=COLOR_MAGENTA
+        )
+        rb_karaoke.pack(anchor="w", pady=2)
+
+        # 4. Genre & Year (Two-column row)
+        meta_row = tk.Frame(form, bg=COLOR_BG_MAIN)
+        meta_row.pack(fill="x", pady=(0, 10))
+
+        col_g = tk.Frame(meta_row, bg=COLOR_BG_MAIN)
+        col_g.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        tk.Label(col_g, text="GENRE:", font=("Helvetica", 8, "bold"), fg=COLOR_TEXT_MUTED, bg=COLOR_BG_MAIN).pack(anchor="w")
+        ent_genre = tk.Entry(col_g, font=("Helvetica", 9), bg="#150a22", fg=COLOR_TEXT_MAIN, insertbackground=COLOR_CYAN, bd=1, relief="solid")
+        ent_genre.pack(fill="x")
+        ent_genre.insert(0, track.get("genre", "") or "")
+
+        col_y = tk.Frame(meta_row, bg=COLOR_BG_MAIN)
+        col_y.pack(side="right", fill="x", expand=True, padx=(6, 0))
+        tk.Label(col_y, text="RELEASE YEAR:", font=("Helvetica", 8, "bold"), fg=COLOR_TEXT_MUTED, bg=COLOR_BG_MAIN).pack(anchor="w")
+        ent_year = tk.Entry(col_y, font=("Helvetica", 9), bg="#150a22", fg=COLOR_TEXT_MAIN, insertbackground=COLOR_CYAN, bd=1, relief="solid")
+        ent_year.pack(fill="x")
+        y_val = track.get("release_year")
+        if y_val and int(y_val) > 0:
+            ent_year.insert(0, str(y_val))
+
+        # 5. File Location on Disk info & relocation checkbox (Option A)
+        curr_local = track.get("local_path", "")
+        file_info = tk.Frame(form, bg="#12081c", padx=8, pady=6, bd=1, relief="solid")
+        file_info.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            file_info,
+            text=f"📁 Current File: {Path(curr_local).name if curr_local else 'None'}",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg="#12081c",
+            anchor="w"
+        ).pack(fill="x")
+
+        var_relocate = tk.BooleanVar(value=True)
+        cb_relocate = tk.Checkbutton(
+            form,
+            text="Move & rename file on disk to match new Artist & Song Type (Option A)",
+            variable=var_relocate,
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_LIME,
+            bg=COLOR_BG_MAIN,
+            selectcolor="#0d0814",
+            activebackground=COLOR_BG_MAIN,
+            activeforeground=COLOR_LIME
+        )
+        cb_relocate.pack(anchor="w", pady=(0, 10))
+
+        # Error banner (hidden initially)
+        lbl_err = tk.Label(form, text="", font=("Helvetica", 8, "bold"), fg=COLOR_DANGER, bg=COLOR_BG_MAIN)
+        lbl_err.pack(anchor="w")
+
+        # Bottom Buttons
+        btn_box = tk.Frame(dlg, bg="#1a1025", padx=16, pady=12)
+        btn_box.pack(fill="x")
+
+        def _on_save():
+            new_title = ent_title.get().strip()
+            new_artist = ent_artist.get().strip()
+            if not new_title:
+                lbl_err.config(text="Please provide a valid song title.")
+                return
+            if not new_artist:
+                lbl_err.config(text="Please provide a valid artist name.")
+                return
+
+            new_is_sa = bool(type_var.get() == 1)
+            new_genre = ent_genre.get().strip()
+            raw_year = ent_year.get().strip()
+            new_year = int(raw_year) if raw_year.isdigit() else 0
+
+            # Option A: Relocate & rename file on disk if requested
+            new_local_path = curr_local
+            if var_relocate.get() and curr_local and Path(curr_local).exists():
+                try:
+                    moved = relocate_and_rename_track_file(
+                        curr_local_path=curr_local,
+                        new_title=new_title,
+                        new_artist=new_artist,
+                        new_is_sing_along=new_is_sa,
+                        video_id=track.get("video_id", "")
+                    )
+                    if moved and moved.exists():
+                        new_local_path = str(moved)
+                except Exception as e:
+                    print(f"[StudioCockpit] File move warning: {e}", file=sys.stderr)
+
+            # Update database
+            updates = {
+                "title": new_title,
+                "artist": new_artist,
+                "original_title": f"{new_artist} - {new_title}",
+                "is_sing_along": 1 if new_is_sa else 0,
+                "local_path": new_local_path,
+                "genre": new_genre,
+                "release_year": new_year
+            }
+            ok = self.db.update_track_metadata(track.get("id"), updates)
+            if not ok:
+                lbl_err.config(text="Database update failed. Please try again.")
+                return
+
+            # Update Treeview in place
+            if self.tree_tracks.exists(item_id):
+                self.tree_tracks.set(item_id, "title", new_title)
+                self.tree_tracks.set(item_id, "artist", new_artist)
+                m_type = "Sing-Along 🎙️" if new_is_sa else "Karaoke 🎵"
+                self.tree_tracks.set(item_id, "type", m_type)
+
+            # Synchronize Cockpit if this song is currently loaded
+            if self.selected_track and self.selected_track.get("id") == track.get("id"):
+                self.selected_track.update(updates)
+                self.lbl_track_title.config(text=new_title)
+                self.lbl_track_artist.config(text=new_artist)
+
+            self.lbl_status.config(
+                text=f"✅ Updated metadata for '{new_title}' by {new_artist} (Option A disk sync complete).",
+                fg=COLOR_LIME
+            )
+            dlg.destroy()
+
+        btn_cancel = tk.Button(
+            btn_box,
+            text="Cancel",
+            bg="#2a1545",
+            fg=COLOR_TEXT_MUTED,
+            font=("Helvetica", 9),
+            bd=0,
+            padx=14,
+            pady=6,
+            command=dlg.destroy
+        )
+        btn_cancel.pack(side="right", padx=(8, 0))
+
+        btn_save = tk.Button(
+            btn_box,
+            text="💾 Save Changes",
+            bg=COLOR_CYAN,
+            fg="#000000",
+            font=("Helvetica", 9, "bold"),
+            bd=0,
+            padx=16,
+            pady=6,
+            command=_on_save
+        )
+        btn_save.pack(side="right")
 
     def _start_track_download(
         self,

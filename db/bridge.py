@@ -153,6 +153,27 @@ class TikiDatabaseBridge:
             row = conn.execute("SELECT * FROM tracks WHERE video_id = ?;", (video_id,)).fetchone()
             return dict(row) if row else None
 
+    def update_track_metadata(self, track_id: int, updates: Dict[str, Any]) -> bool:
+        """
+        Updates metadata (title, artist, original_title, is_sing_along, local_path, genre, release_year)
+        for a track in Tiki Karaoke's database. Automatically synchronizes with tracks_fts via SQLite triggers.
+        """
+        allowed = {"title", "artist", "original_title", "is_sing_along", "local_path", "genre", "release_year"}
+        fields = {k: v for k, v in updates.items() if k in allowed}
+        if not fields:
+            return False
+
+        set_clause = ", ".join([f"{k} = :{k}" for k in fields.keys()])
+        sql = f"UPDATE tracks SET {set_clause} WHERE id = :id;"
+        params = dict(fields)
+        params["id"] = track_id
+
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            conn.commit()
+            return cur.rowcount > 0
+
     def find_sing_along_equivalent(self, title: str, artist: str) -> Optional[Dict[str, Any]]:
         """
         Finds a local sing-along track that matches the given title and artist.
