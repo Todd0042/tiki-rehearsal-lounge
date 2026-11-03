@@ -2587,9 +2587,19 @@ class StudioCockpitWindow:
             self._downloading_tracks.discard(video_id)
 
             def _done():
-                if meta and meta.get("id"):
+                track_id = meta.get("id") if meta else None
+                if meta and not track_id:
+                    db_row = self.db.get_track_by_video_id(video_id)
+                    if db_row and db_row.get("id"):
+                        track_id = db_row["id"]
+                        meta["id"] = track_id
+
+                has_file = bool(meta and meta.get("local_path") and Path(meta["local_path"]).exists())
+
+                if meta and (track_id or has_file):
+                    display_id = str(track_id) if track_id else "Ready"
                     if self.tree_tracks.exists(item_id):
-                        self.tree_tracks.set(item_id, "id", str(meta["id"]))
+                        self.tree_tracks.set(item_id, "id", display_id)
                         self.tree_tracks.set(item_id, "downloaded", "✅ Ready (Offline)")
                     self.lbl_status.config(
                         text=f"✅ Downloaded & EBU R128 normalized '{title}' (-{TIKI_TARGET_LUFS} LUFS). Ready for rehearsal!",

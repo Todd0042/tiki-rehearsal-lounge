@@ -141,6 +141,12 @@ class TikiDatabaseBridge:
             row = conn.execute("SELECT * FROM tracks WHERE id = ?;", (track_id,)).fetchone()
             return dict(row) if row else None
 
+    def get_track_by_video_id(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a track record by its YouTube video_id."""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM tracks WHERE video_id = ?;", (video_id,)).fetchone()
+            return dict(row) if row else None
+
     def find_sing_along_equivalent(self, title: str, artist: str) -> Optional[Dict[str, Any]]:
         """
         Finds a local sing-along track that matches the given title and artist.
@@ -223,4 +229,9 @@ class TikiDatabaseBridge:
             cur = conn.cursor()
             cur.execute(sql, params)
             conn.commit()
-            return cur.lastrowid
+            # In SQLite, UPSERT (ON CONFLICT DO UPDATE) with FTS triggers does not update lastrowid.
+            # Explicitly query the primary key by video_id to ensure the authentic ID is returned.
+            row = conn.execute("SELECT id FROM tracks WHERE video_id = ?;", (params["video_id"],)).fetchone()
+            if row:
+                return row["id"] if isinstance(row, sqlite3.Row) else row[0]
+            return cur.lastrowid or 0
