@@ -91,3 +91,60 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: release_assets/*
+
+  itch-deploy:
+    name: Deploy to Itch.io (Butler)
+    needs: [build-linux-appimage, publish-github-release]
+    runs-on: ubuntu-latest
+    env:
+      BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+    steps:
+      - name: Check Butler Credentials
+        id: check_auth
+        shell: bash
+        run: |
+          if [ -z "$BUTLER_API_KEY" ]; then
+            echo "::notice ::BUTLER_API_KEY secret is not set. Skipping Itch.io deployment."
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download AppImage Artifact
+        if: steps.check_auth.outputs.has_key == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-rehearsal-appimage
+          path: dist/
+
+      - name: Install Butler
+        if: steps.check_auth.outputs.has_key == 'true'
+        shell: bash
+        run: |
+          curl -L -A "Mozilla/5.0" -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          sudo unzip -o butler.zip -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/butler
+          rm -f butler.zip
+          butler -V
+
+      - name: Push to Itch.io (rehearsal-linux)
+        if: steps.check_auth.outputs.has_key == 'true'
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            REL_VER="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref_name }}" =~ ^v[0-9] ]]; then
+            RAW_TAG="${{ github.ref_name }}"
+            REL_VER="${RAW_TAG#v}"
+          else
+            REL_VER="${{ github.ref_name }}"
+          fi
+
+          echo "=========================================================="
+          echo "Deploying Tiki Rehearsal Lounge v$REL_VER to Itch.io"
+          echo "Channel: todd0042/tiki-karaoke-lounge:rehearsal-linux"
+          echo "=========================================================="
+
+          butler push dist/*.AppImage todd0042/tiki-karaoke-lounge:rehearsal-linux --userversion "$REL_VER"
+          echo "✅ Itch.io deployment completed successfully!"
+
