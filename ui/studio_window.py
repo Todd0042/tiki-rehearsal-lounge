@@ -985,15 +985,19 @@ class StudioCockpitWindow:
 
             try:
                 res = self.calibrator.analyze_siren_sweep(take_path)
+                # Immediately update profile and persist to JSON
+                self.vocal_profile = self.calibrator.update_siren_sweep(res)
+                self.analyzer.update_profile(self.vocal_profile)
+                self.root.after_idle(self._refresh_profile_display)
+
                 msg = (
-                    f"Siren Sweep Analyzed:\n\n"
+                    f"Siren Sweep Analyzed & Saved:\n\n"
                     f"• Vocal Floor: {res['min_note']} ({res['min_hz']:.1f} Hz)\n"
                     f"• Vocal Ceiling: {res['max_note']} ({res['max_hz']:.1f} Hz)\n"
-                    f"• Total Span: {res['range_semitones']:.1f} semitones"
+                    f"• Total Span: {res['range_semitones']:.1f} semitones ({res['octaves']} octaves)\n\n"
+                    f"Profile updated and saved to vocal_profile.json!"
                 )
                 self.root.after_idle(lambda: messagebox.showinfo("Exercise 1 Complete", msg))
-                self.vocal_profile = self.calibrator.load_profile()
-                self._refresh_profile_display()
             except Exception as e:
                 self.root.after_idle(lambda: messagebox.showerror("Calibration Notice", str(e)))
             finally:
@@ -1044,15 +1048,19 @@ class StudioCockpitWindow:
 
             try:
                 res = self.calibrator.analyze_speaking_anchor(take_path)
+                # Immediately update profile and persist to JSON
+                self.vocal_profile = self.calibrator.update_speaking_anchor(res)
+                self.analyzer.update_profile(self.vocal_profile)
+                self.root.after_idle(self._refresh_profile_display)
+
                 msg = (
-                    f"Speaking Anchor Established:\n\n"
-                    f"• Median Speaking Pitch: {res['anchor_note']} ({res['anchor_hz']:.1f} Hz)\n"
-                    f"• Power Tessitura: {res['tessitura_min_note']} to {res['tessitura_max_note']}\n"
-                    f"• Voice Type: {res['vocal_type']}"
+                    f"Speaking Anchor Established & Saved:\n\n"
+                    f"• Speaking Pitch Anchor: {res['anchor_note']} ({res['anchor_hz']:.1f} Hz)\n"
+                    f"• Power Tessitura Sweet Spot: {res['tessitura_min_note']} to {res['tessitura_max_note']}\n"
+                    f"• Voice Category: {self.vocal_profile.vocal_type}\n\n"
+                    f"Profile updated and saved to vocal_profile.json!"
                 )
                 self.root.after_idle(lambda: messagebox.showinfo("Exercise 2 Complete", msg))
-                self.vocal_profile = self.calibrator.load_profile()
-                self._refresh_profile_display()
             except Exception as e:
                 self.root.after_idle(lambda: messagebox.showerror("Anchor Notice", str(e)))
             finally:
@@ -1067,16 +1075,31 @@ class StudioCockpitWindow:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _refresh_profile_display(self):
-        if not self.vocal_profile:
+        p = self.vocal_profile or self.calibrator.load_profile()
+        if not p or (p.anchor_hz <= 0 and p.range_max_hz <= 0):
+            self.lbl_prof_voice_type.config(text="Voice Classification: Not Calibrated")
+            self.lbl_prof_details.config(text="Speaking Anchor: --  •  Vocal Floor: --  •  Vocal Ceiling: --")
+            self.lbl_prof_tessitura.config(text="Power Tessitura Sweet Spot: -- to --")
             return
-        p = self.vocal_profile
+
+        self.vocal_profile = p
         self.lbl_prof_voice_type.config(text=f"Voice Classification: {p.vocal_type}")
+
+        anch_str = f"{p.anchor_note} ({p.anchor_hz:.1f} Hz)" if p.anchor_hz > 0 else "Pending Step 2"
+        if p.range_max_hz > 0:
+            range_str = f"{p.range_min_note} to {p.range_max_note} ({p.range_semitones:.1f} st)"
+        else:
+            range_str = "Pending Step 1"
+
         self.lbl_prof_details.config(
-            text=f"Speaking Anchor: {p.anchor_note} ({p.anchor_hz:.1f} Hz)  •  Range: {p.range_min_note} to {p.range_max_note} ({p.range_semitones:.1f} st)"
+            text=f"Speaking Anchor: {anch_str}  •  Range: {range_str}"
         )
-        self.lbl_prof_tessitura.config(
-            text=f"Power Tessitura Sweet Spot: {p.tessitura_min_note} to {p.tessitura_max_note}"
-        )
+
+        if p.tessitura_max_hz > 0:
+            tess_str = f"{p.tessitura_min_note} to {p.tessitura_max_note}"
+        else:
+            tess_str = "-- to -- (Pending Step 2)"
+        self.lbl_prof_tessitura.config(text=f"Power Tessitura Sweet Spot: {tess_str}")
 
     def _on_close(self):
         self.player.stop()

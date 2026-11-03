@@ -138,36 +138,40 @@ def extract_pitch_contour(
             continue
         norm_corr = corr / corr[0]
 
-        # Search for peak within allowable pitch period range
-        if max_period >= len(norm_corr):
-            max_period = len(norm_corr) - 1
-        if min_period >= max_period:
+        # Search for true local peaks within allowable pitch period range
+        curr_max = min(max_period, len(norm_corr) - 2)
+        if min_period >= curr_max:
             continue
 
-        search_slice = norm_corr[min_period:max_period]
-        if len(search_slice) == 0:
+        peaks = []
+        for k in range(min_period + 1, curr_max):
+            val = norm_corr[k]
+            if val >= voicing_threshold and val > norm_corr[k - 1] and val >= norm_corr[k + 1]:
+                peaks.append((k, val))
+
+        if not peaks:
             continue
 
-        peak_idx = np.argmax(search_slice) + min_period
-        peak_val = norm_corr[peak_idx]
+        # Choose the fundamental period: favor largest lag (lowest frequency) within 82% of max peak
+        max_val = max(p[1] for p in peaks)
+        chosen_k, chosen_val = peaks[0]
+        for k, val in reversed(peaks):
+            if val >= 0.82 * max_val:
+                chosen_k, chosen_val = k, val
+                break
 
-        if peak_val >= voicing_threshold:
-            # Parabolic interpolation for sub-sample accuracy
-            if 0 < peak_idx < len(norm_corr) - 1:
-                alpha = norm_corr[peak_idx - 1]
-                beta = norm_corr[peak_idx]
-                gamma = norm_corr[peak_idx + 1]
-                denom = alpha - 2 * beta + gamma
-                if abs(denom) > 1e-7:
-                    delta = 0.5 * (alpha - gamma) / denom
-                    true_lag = peak_idx + delta
-                else:
-                    true_lag = float(peak_idx)
-            else:
-                true_lag = float(peak_idx)
+        # Parabolic interpolation for sub-sample accuracy
+        alpha = norm_corr[chosen_k - 1]
+        beta = norm_corr[chosen_k]
+        gamma = norm_corr[chosen_k + 1]
+        denom = alpha - 2 * beta + gamma
+        delta = 0.5 * (alpha - gamma) / denom if abs(denom) > 1e-7 else 0.0
+        lag = chosen_k + delta
 
-            if true_lag > 0:
-                pitches[i] = sr / true_lag
+        if lag > 0:
+            pitch_hz = sr / lag
+            if min_hz <= pitch_hz <= max_hz:
+                pitches[i] = pitch_hz
 
     return times, pitches
 
@@ -175,24 +179,24 @@ def extract_pitch_contour(
 @dataclass
 class VocalProfile:
     # Speaking Anchor
-    anchor_hz: float
-    anchor_note: str
+    anchor_hz: float = 0.0
+    anchor_note: str = ""
 
     # Absolute Vocal Range (From Siren Sweep)
-    range_min_hz: float
-    range_min_note: str
-    range_max_hz: float
-    range_max_note: str
-    range_semitones: float
+    range_min_hz: float = 0.0
+    range_min_note: str = ""
+    range_max_hz: float = 0.0
+    range_max_note: str = ""
+    range_semitones: float = 0.0
 
     # Power Tessitura (Comfort Zone)
-    tessitura_min_hz: float
-    tessitura_min_note: str
-    tessitura_max_hz: float
-    tessitura_max_note: str
+    tessitura_min_hz: float = 0.0
+    tessitura_min_note: str = ""
+    tessitura_max_hz: float = 0.0
+    tessitura_max_note: str = ""
 
-    vocal_type: str
-    calibrated_at: str
+    vocal_type: str = "Uncalibrated"
+    calibrated_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -204,6 +208,18 @@ class VocalProfile:
 
 def classify_voice_type(min_midi: float, max_midi: float, anchor_midi: float) -> str:
     """Classifies voice category based on range and speaking fundamental."""
+    if anchor_midi <= 0:
+        if max_midi <= 55:
+            return "Bass"
+        elif max_midi <= 62:
+            return "Baritone"
+        elif max_midi <= 69:
+            return "Tenor"
+        elif max_midi <= 76:
+            return "Mezzo-Soprano"
+        else:
+            return "Soprano"
+
     if anchor_midi < 43:  # Below G2
         return "Bass"
     elif anchor_midi < 48:  # G2 to C3
@@ -244,13 +260,52 @@ class VocalCalibrationManager:
         except Exception as e:
             print(f"[VocalProfile] Failed to save profile: {e}")
 
+    def update_siren_sweep(self, siren_res: Dict[str, Any]) -> VocalProfile:
+        """Updates in-memory profile with siren glide results and persists immediately."""
+        profile = self.load_profile() or VocalProfile()
+        profile.range_min_hz = siren_res["min_hz"]
+        profile.range_min_note = siren_res["min_note"]
+        profile.range_max_hz = siren_res["max_hz"]
+        profile.range_max_note = siren_res["max_note"]
+        profile.range_semitones = siren_res["range_semitones"]
+        profile.calibrated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        min_m = hz_to_midi(profile.range_min_hz)
+        max_m = hz_to_midi(profile.range_max_hz)
+        anch_m = hz_to_midi(profile.anchor_hz) if profile.anchor_hz > 0 else 0.0
+        profile.vocal_type = classify_voice_type(min_m, max_m, anch_m)
+
+        self.save_profile(profile)
+        return profile
+
+    def update_speaking_anchor(self, anchor_res: Dict[str, Any]) -> VocalProfile:
+        """Updates in-memory profile with speaking anchor results and persists immediately."""
+        profile = self.load_profile() or VocalProfile()
+        profile.anchor_hz = anchor_res["anchor_hz"]
+        profile.anchor_note = anchor_res["anchor_note"]
+        profile.tessitura_min_hz = anchor_res["tessitura_min_hz"]
+        profile.tessitura_min_note = anchor_res["tessitura_min_note"]
+        profile.tessitura_max_hz = anchor_res["tessitura_max_hz"]
+        profile.tessitura_max_note = anchor_res["tessitura_max_note"]
+        profile.calibrated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        min_m = hz_to_midi(profile.range_min_hz) if profile.range_min_hz > 0 else 0.0
+        max_m = hz_to_midi(profile.range_max_hz) if profile.range_max_hz > 0 else 0.0
+        anch_m = hz_to_midi(profile.anchor_hz)
+        profile.vocal_type = classify_voice_type(min_m, max_m, anch_m)
+
+        self.save_profile(profile)
+        return profile
+
     def analyze_siren_sweep(self, wav_path: Path) -> Dict[str, Any]:
         """
         Exercise 1: Analyzes the Siren Glide recording (Ooooo ➔ Aaaaa).
         Returns minimum, maximum sustained pitch, and total semitone range.
         """
         audio, sr = read_wav_mono(wav_path)
-        times, pitches = extract_pitch_contour(audio, sr, voicing_threshold=0.35)
+        times, pitches = extract_pitch_contour(
+            audio, sr, min_hz=55.0, max_hz=1000.0, voicing_threshold=0.32
+        )
 
         voiced = pitches[pitches > 0]
         if len(voiced) < 15:
@@ -283,11 +338,14 @@ class VocalCalibrationManager:
         Extracts median speaking fundamental (F0 speak) and derives the Power Tessitura.
         """
         audio, sr = read_wav_mono(wav_path)
-        times, pitches = extract_pitch_contour(audio, sr, voicing_threshold=0.40)
+        # Speaking voice fundamental search window: 60 Hz to 350 Hz
+        times, pitches = extract_pitch_contour(
+            audio, sr, frame_size_ms=45.0, min_hz=60.0, max_hz=350.0, voicing_threshold=0.35
+        )
 
         voiced = pitches[pitches > 0]
         if len(voiced) < 15:
-            raise ValueError("Insufficient voice detected in speech recording.")
+            raise ValueError("Insufficient voice detected in speech recording. Please speak louder and clearly.")
 
         median_hz = float(np.median(voiced))
         anchor_midi = hz_to_midi(median_hz)
@@ -300,6 +358,7 @@ class VocalCalibrationManager:
 
         tess_min_hz = midi_to_hz(tess_min_midi)
         tess_max_hz = midi_to_hz(tess_max_midi)
+        vocal_type = classify_voice_type(0.0, 0.0, anchor_midi)
 
         return {
             "anchor_hz": round(median_hz, 1),
@@ -308,6 +367,7 @@ class VocalCalibrationManager:
             "tessitura_min_note": midi_to_note_name(tess_min_midi),
             "tessitura_max_hz": round(tess_max_hz, 1),
             "tessitura_max_note": midi_to_note_name(tess_max_midi),
+            "vocal_type": vocal_type,
         }
 
     def combine_and_save(
@@ -316,27 +376,6 @@ class VocalCalibrationManager:
         anchor_res: Dict[str, Any]
     ) -> VocalProfile:
         """Combines results from both exercises into a verified VocalProfile and saves it."""
-        min_midi = hz_to_midi(siren_res["min_hz"])
-        max_midi = hz_to_midi(siren_res["max_hz"])
-        anchor_midi = hz_to_midi(anchor_res["anchor_hz"])
-
-        vocal_type = classify_voice_type(min_midi, max_midi, anchor_midi)
-
-        profile = VocalProfile(
-            anchor_hz=anchor_res["anchor_hz"],
-            anchor_note=anchor_res["anchor_note"],
-            range_min_hz=siren_res["min_hz"],
-            range_min_note=siren_res["min_note"],
-            range_max_hz=siren_res["max_hz"],
-            range_max_note=siren_res["max_note"],
-            range_semitones=siren_res["range_semitones"],
-            tessitura_min_hz=anchor_res["tessitura_min_hz"],
-            tessitura_min_note=anchor_res["tessitura_min_note"],
-            tessitura_max_hz=anchor_res["tessitura_max_hz"],
-            tessitura_max_note=anchor_res["tessitura_max_note"],
-            vocal_type=vocal_type,
-            calibrated_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
-
-        self.save_profile(profile)
+        profile = self.update_siren_sweep(siren_res)
+        profile = self.update_speaking_anchor(anchor_res)
         return profile

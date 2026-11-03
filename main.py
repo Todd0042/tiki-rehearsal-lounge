@@ -66,12 +66,18 @@ def run_cli_cockpit():
     print(f"  • Sing-Along Guide Vocals:   {stats['sing_along_tracks']:,}")
     print(f"  • Local Video/Audio Ready:   {stats['local_ready_tracks']:,}\n")
 
-    if profile:
+    if profile and (profile.anchor_hz > 0 or profile.range_max_hz > 0):
         print(f"{GOLD}Singer Vocal Profile Loaded:{RESET}")
-        print(f"  • Voice Type: {BOLD}{profile.vocal_type}{RESET}")
-        print(f"  • Speaking Anchor: {profile.anchor_note} ({profile.anchor_hz:.1f} Hz)")
-        print(f"  • Absolute Range: {profile.range_min_note} to {profile.range_max_note} ({profile.range_semitones:.1f} semitones)")
-        print(f"  • Power Sweet Spot: {LIME}{profile.tessitura_min_note} to {profile.tessitura_max_note}{RESET}\n")
+        print(f"  • Voice Category:   {BOLD}{profile.vocal_type}{RESET}")
+        anch_str = f"{profile.anchor_note} ({profile.anchor_hz:.1f} Hz)" if profile.anchor_hz > 0 else "Pending Step 2"
+        print(f"  • Speaking Anchor:  {anch_str}")
+        if profile.range_max_hz > 0:
+            range_str = f"{profile.range_min_note} to {profile.range_max_note} ({profile.range_semitones:.1f} semitones)"
+        else:
+            range_str = "Pending Step 1"
+        print(f"  • Usable Range:     {range_str}")
+        tess_str = f"{profile.tessitura_min_note} to {profile.tessitura_max_note}" if profile.tessitura_max_hz > 0 else "Pending Step 2"
+        print(f"  • Power Sweet Spot: {LIME}{tess_str}{RESET}\n")
     else:
         print(f"{MAGENTA}Notice: No vocal profile calibrated yet. Run exercises [2] & [3] to calibrate!{RESET}\n")
 
@@ -154,12 +160,13 @@ def run_cli_cockpit():
             print(f"\n{CYAN}Analyzing siren sweep pitch contour...{RESET}")
             try:
                 res = calibrator.analyze_siren_sweep(take_path)
-                print(f"\n{LIME}{BOLD}Siren Sweep Results:{RESET}")
+                profile = calibrator.update_siren_sweep(res)
+                analyzer.update_profile(profile)
+
+                print(f"\n{LIME}{BOLD}Siren Sweep Results (Saved to vocal_profile.json):{RESET}")
                 print(f"  • Vocal Floor:   {res['min_note']} ({res['min_hz']:.1f} Hz)")
                 print(f"  • Vocal Ceiling: {res['max_note']} ({res['max_hz']:.1f} Hz)")
-                print(f"  • Usable Span:   {res['range_semitones']:.1f} semitones")
-                profile = calibrator.load_profile()
-                analyzer.update_profile(profile)
+                print(f"  • Usable Span:   {res['range_semitones']:.1f} semitones ({res['octaves']} octaves)")
             except Exception as e:
                 print(f"{MAGENTA}Notice: {e}{RESET}")
 
@@ -204,12 +211,13 @@ def run_cli_cockpit():
             print(f"\n{CYAN}Analyzing speaking fundamental...{RESET}")
             try:
                 res = calibrator.analyze_speaking_anchor(take_path)
-                print(f"\n{LIME}{BOLD}Speaking Anchor Results:{RESET}")
+                profile = calibrator.update_speaking_anchor(res)
+                analyzer.update_profile(profile)
+
+                print(f"\n{LIME}{BOLD}Speaking Anchor Results (Saved to vocal_profile.json):{RESET}")
                 print(f"  • Speaking Pitch:   {res['anchor_note']} ({res['anchor_hz']:.1f} Hz)")
                 print(f"  • Power Sweet Spot: {LIME}{res['tessitura_min_note']} to {res['tessitura_max_note']}{RESET}")
-                print(f"  • Voice Category:   {res['vocal_type']}")
-                profile = calibrator.load_profile()
-                analyzer.update_profile(profile)
+                print(f"  • Voice Category:   {profile.vocal_type}")
             except Exception as e:
                 print(f"{MAGENTA}Notice: {e}{RESET}")
 
