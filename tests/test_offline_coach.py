@@ -47,6 +47,23 @@ class TestOfflineCoach(unittest.TestCase):
         self.assertIn("Drop the jaw", debrief)
         self.assertIn("Transposing from +0 to **-1**", debrief)
 
+    def test_server_binary_resolution(self):
+        """Verifies that _find_llama_server_binary locates bundled bin/llama-server if present."""
+        bin_path = self.coach._find_llama_server_binary()
+        if bin_path:
+            self.assertTrue(bin_path.exists())
+            self.assertTrue("llama-server" in bin_path.name.lower())
+
+    def test_fallback_chat_reply(self):
+        """Verifies that chat_with_coach returns user-friendly guidance instead of raw dev errors."""
+        reply = self.coach.chat_with_coach("Hello coach", [])
+        self.assertIsInstance(reply, str)
+        self.assertNotIn("Install 'llama-cpp-python'", reply)
+        self.assertGreater(len(reply), 20)
+
+    def tearDown(self):
+        self.coach.shutdown_engine()
+
 
 if __name__ == "__main__":
     unittest.main()

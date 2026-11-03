@@ -52,6 +52,7 @@ pyinstaller --clean -y --onedir \
     --hidden-import ai.offline_coach \
     --hidden-import db \
     --hidden-import db.bridge \
+    --hidden-import db.progression_db \
     --hidden-import ui \
     --hidden-import ui.studio_window \
     --hidden-import config \
@@ -78,6 +79,17 @@ docker run --rm \
 
 echo "=== [3/5] Assembling AppDir ==="
 cp -r "${BUILD_TMP}/TikiRehearsalLounge"/* "$APPDIR/usr/bin/"
+
+# Stage Standalone llama.cpp Linux engine into AppDir
+echo "=== Staging Linux llama.cpp Server into AppDir ==="
+LLAMA_TAR="/tmp/llama_linux_x64.tar.gz"
+if [ ! -f "$LLAMA_TAR" ]; then
+    curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b12078/llama-b12078-bin-ubuntu-x64.tar.gz" -o "$LLAMA_TAR"
+fi
+tar -xzf "$LLAMA_TAR" -C "/tmp"
+cp -v /tmp/llama-b12078/llama-server "$APPDIR/usr/bin/"
+cp -v /tmp/llama-b12078/*.so* "$APPDIR/usr/bin/"
+chmod +x "$APPDIR/usr/bin/llama-server"
 
 if [ -f "${REPO_ROOT}/static/tiki-icon.png" ]; then
     cp "${REPO_ROOT}/static/tiki-icon.png" "$APPDIR/tiki-icon.png"

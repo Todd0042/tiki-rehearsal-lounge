@@ -20,3 +20,11 @@ profile_local.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Binaries and Helper Tools
+bin/
+packaging/windows/bin/
+*.zip
+*.tar.gz
+*.7z
+

@@ -52,6 +52,42 @@ def get_latest_mpv_url() -> str:
     # Fallback known release URL
     return "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261103/mpv-x86_64-20261103-git-a687796d9d.7z"
 
+def get_latest_llama_url(is_windows: bool = True) -> str:
+    """Queries GitHub Releases API for latest llama.cpp CPU standalone build."""
+    try:
+        api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=5"
+        req = urllib.request.Request(api_url, headers={"User-Agent": "TikiRehearsalPackager/1.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            releases = json.loads(resp.read().decode("utf-8"))
+            pattern = "-bin-win-cpu-x64.zip" if is_windows else "-bin-ubuntu-x64.tar.gz"
+            for rel in releases:
+                for asset in rel.get("assets", []):
+                    name = asset.get("name", "")
+                    if name.startswith("llama-") and name.endswith(pattern):
+                        url = asset.get("browser_download_url")
+                        if url:
+                            print(f" [LLAMA] Resolved latest llama.cpp release asset: {name}")
+                            return url
+    except Exception as e:
+        print(f"   [Notice] Could not query GitHub API for llama.cpp: {e}")
+
+    # Fallback known release URL
+    if is_windows:
+        return "https://github.com/ggml-org/llama.cpp/releases/download/b12078/llama-b12078-bin-win-cpu-x64.zip"
+    else:
+        return "https://github.com/ggml-org/llama.cpp/releases/download/b12078/llama-b12078-bin-ubuntu-x64.tar.gz"
+
+def extract_llama_binaries(zip_path: Path, dest_dir: Path):
+    print(f" [Extract] Extracting llama.cpp server and libraries from {zip_path.name}...")
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        for member in z.infolist():
+            member_base = Path(member.filename).name.lower()
+            if member_base.endswith(".dll") or member_base in ("llama-server.exe", "llama-cli.exe"):
+                dest_file = dest_dir / Path(member.filename).name
+                print(f"   -> Extracting {member.filename} to {dest_file.name}")
+                with z.open(member) as source, open(dest_file, "wb") as target_f:
+                    shutil.copyfileobj(source, target_f)
+
 def download_file(url: str, dest_path: Path):
     print(f" [Download] {url} -> {dest_path.name}")
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +187,23 @@ def fetch_all_binaries(output_dir: Path = DEFAULT_BIN_DIR):
     # Validate critical binaries
     if not mpv_exe.exists():
         raise RuntimeError(f"mpv.exe was not successfully extracted to {output_dir}")
+
+    # 3. Fetch Standalone llama.cpp Server & Runtime
+    llama_exe = output_dir / "llama-server.exe"
+    if llama_exe.exists():
+        print(f" [OK] llama-server.exe already exists in {output_dir.name}/. Skipping.")
+    else:
+        llama_url = get_latest_llama_url(is_windows=True)
+        temp_zip = output_dir / "llama_temp.zip"
+        try:
+            download_file(llama_url, temp_zip)
+            extract_llama_binaries(temp_zip, output_dir)
+        finally:
+            if temp_zip.exists():
+                temp_zip.unlink()
+
+    if not llama_exe.exists():
+        raise RuntimeError(f"llama-server.exe was not successfully extracted to {output_dir}")
 
     print("\n[Complete] Windows 64-bit binary staging complete:")
     for f in output_dir.glob("*.exe"):

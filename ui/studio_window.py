@@ -2537,6 +2537,16 @@ class StudioCockpitWindow:
                 bg="#1a0d2a"
             ).pack(anchor="w")
 
+            server_bin = self.offline_coach._find_llama_server_binary()
+            engine_str = f"Standalone llama.cpp ({server_bin.name})" if server_bin else "Python llama_cpp"
+            tk.Label(
+                card,
+                text=f"• AI Inference Engine: {engine_str}",
+                font=("Helvetica", 9),
+                fg=COLOR_CYAN,
+                bg="#1a0d2a"
+            ).pack(anchor="w")
+
             tk.Label(
                 card,
                 text=f"• Storage Location: {p.parent if p else self.offline_coach.models_dir}",

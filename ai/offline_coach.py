@@ -14,12 +14,16 @@ import os
 import sys
 import time
 import json
+import shutil
+import socket
+import atexit
+import subprocess
 import threading
 import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 
-from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME, STUDIO_CONFIG_DIR
+from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME, STUDIO_CONFIG_DIR, get_bundled_binary_path
 from audio.tone_generator import transpose_note, clamp_note_to_range, parse_target_notes
 
 MODELS_DIR = STUDIO_CONFIG_DIR / "models"
@@ -65,6 +69,10 @@ class OfflineVocalCoach:
         self._llm = None
         self._loaded_model_key: Optional[str] = None
         self._load_lock = threading.Lock()
+        self._server_proc: Optional[subprocess.Popen] = None
+        self._server_port: Optional[int] = None
+        self._server_url: Optional[str] = None
+        atexit.register(self.shutdown_engine)
 
     def get_installed_model(self) -> Optional[Dict[str, Any]]:
         """Returns metadata of currently installed model, if any."""
@@ -77,15 +85,31 @@ class OfflineVocalCoach:
     def is_installed(self) -> bool:
         return self.get_installed_model() is not None
 
+    def shutdown_engine(self):
+        """Terminates running llama-server background process and resets state."""
+        with self._load_lock:
+            if self._server_proc is not None:
+                try:
+                    self._server_proc.terminate()
+                    self._server_proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        self._server_proc.kill()
+                    except Exception:
+                        pass
+                self._server_proc = None
+                self._server_port = None
+                self._server_url = None
+                self._loaded_model_key = None
+            self._llm = None
+
     def uninstall_model(self, model_key: Optional[str] = None) -> bool:
         """
         Safely unloads LLM instance and removes downloaded model file(s) from disk.
         If model_key is None, removes all installed models.
         """
+        self.shutdown_engine()
         with self._load_lock:
-            self._llm = None
-            self._loaded_model_key = None
-
             removed = False
             targets = [AVAILABLE_MODELS[model_key]] if model_key and model_key in AVAILABLE_MODELS else AVAILABLE_MODELS.values()
             for meta in targets:
@@ -157,6 +181,8 @@ class OfflineVocalCoach:
             if progress_cb:
                 progress_cb(1.0, f"Installed {meta['name']} successfully!")
 
+            # Warm up engine in background
+            threading.Thread(target=self.load_engine, daemon=True).start()
             return True
 
         except Exception as e:
@@ -166,19 +192,117 @@ class OfflineVocalCoach:
                 progress_cb(0.0, f"Download failed: {e}")
             return False
 
+    def _find_llama_server_binary(self) -> Optional[Path]:
+        """Locates bundled or system llama-server binary."""
+        cand = get_bundled_binary_path("llama-server")
+        if cand and cand.is_file():
+            return cand
+        cand = shutil.which("llama-server")
+        if cand:
+            return Path(cand)
+        app_root = Path(__file__).resolve().parent.parent
+        for sub in ["bin", "usr/bin", ""]:
+            target_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+            p = app_root / sub / target_name if sub else app_root / target_name
+            if p.is_file():
+                return p
+        return None
+
+    def _check_server_healthy(self, url: str) -> bool:
+        """Polls llama-server /health endpoint."""
+        try:
+            req = urllib.request.Request(f"{url}/health", headers={"User-Agent": "TikiCoach/1.0"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return data.get("status") in ("ok", "loading model", "no slot available")
+        except Exception:
+            pass
+        return False
+
+    def is_engine_ready(self) -> bool:
+        """Returns True if the engine is loaded and responsive."""
+        if self._server_url:
+            return self._check_server_healthy(self._server_url)
+        return self._llm is not None
+
     def load_engine(self) -> bool:
-        """Loads llama-cpp-python engine with installed model."""
+        """Loads llama-server standalone engine (or llama-cpp-python fallback) with installed model."""
         with self._load_lock:
             installed = self.get_installed_model()
             if not installed:
                 return False
 
+            # Check if server already running and healthy for this model
+            if self._server_proc is not None and self._server_url and self._loaded_model_key == installed["key"]:
+                if self._check_server_healthy(self._server_url):
+                    return True
+                self.shutdown_engine()
+
+            # Check if in-process llama_cpp already loaded
             if self._llm is not None and self._loaded_model_key == installed["key"]:
                 return True
 
+            # 1. Try launching standalone llama-server
+            server_bin = self._find_llama_server_binary()
+            if server_bin:
+                try:
+                    # Find free local port
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.bind(("127.0.0.1", 0))
+                        port = s.getsockname()[1]
+
+                    n_threads = max(2, os.cpu_count() - 1 if os.cpu_count() else 4)
+                    cmd = [
+                        str(server_bin),
+                        "-m", str(installed["path"]),
+                        "--port", str(port),
+                        "--host", "127.0.0.1",
+                        "--threads", str(n_threads),
+                        "--ctx-size", "2048",
+                        "--log-disable"
+                    ]
+                    flags = 0
+                    if sys.platform == "win32":
+                        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=flags
+                    )
+                    url = f"http://127.0.0.1:{port}"
+
+                    # Poll for server readiness (up to 15 seconds)
+                    ready = False
+                    for _ in range(75):
+                        if proc.poll() is not None:
+                            break
+                        if self._check_server_healthy(url):
+                            ready = True
+                            break
+                        time.sleep(0.2)
+
+                    if ready:
+                        self._server_proc = proc
+                        self._server_port = port
+                        self._server_url = url
+                        self._loaded_model_key = installed["key"]
+                        print(f"[OfflineVocalCoach] Standalone llama-server active on {url}", file=sys.stderr)
+                        return True
+                    else:
+                        print(f"[OfflineVocalCoach] llama-server startup timed out (exit code: {proc.poll()})", file=sys.stderr)
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"[OfflineVocalCoach] Error launching llama-server: {e}", file=sys.stderr)
+
+            # 2. In-process fallback via llama_cpp if installed
             try:
                 from llama_cpp import Llama
-                # Set up Llama with AVX2 multi-threading
                 n_threads = max(2, os.cpu_count() - 1 if os.cpu_count() else 4)
                 self._llm = Llama(
                     model_path=str(installed["path"]),
@@ -189,11 +313,61 @@ class OfflineVocalCoach:
                 self._loaded_model_key = installed["key"]
                 return True
             except ImportError:
-                print("[OfflineVocalCoach] Notice: llama-cpp-python is not installed in Python environment.", file=sys.stderr)
-                return False
+                pass
             except Exception as e:
-                print(f"[OfflineVocalCoach] Engine load error: {e}", file=sys.stderr)
-                return False
+                print(f"[OfflineVocalCoach] In-process llama_cpp error: {e}", file=sys.stderr)
+
+            return False
+
+    def _query_completion(
+        self,
+        prompt: str,
+        max_tokens: int = 500,
+        temperature: float = 0.7,
+        stop: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """Queries active backend (llama-server or llama_cpp in-process)."""
+        stop_tokens = stop or ["<|im_end|>", "<|endoftext|>"]
+
+        # 1. llama-server loopback endpoint
+        if self._server_url:
+            try:
+                url = f"{self._server_url}/completion"
+                req = urllib.request.Request(
+                    url,
+                    headers={"Content-Type": "application/json", "User-Agent": "TikiCoach/1.0"}
+                )
+                payload = json.dumps({
+                    "prompt": prompt,
+                    "n_predict": max_tokens,
+                    "temperature": temperature,
+                    "top_p": 0.9,
+                    "stop": stop_tokens
+                }).encode("utf-8")
+                with urllib.request.urlopen(req, data=payload, timeout=60) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        content = data.get("content", "")
+                        return content.strip() if content else None
+            except Exception as e:
+                print(f"[OfflineVocalCoach] llama-server query error: {e}", file=sys.stderr)
+
+        # 2. In-process llama_cpp fallback
+        if self._llm is not None:
+            try:
+                output = self._llm(
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=0.9,
+                    stop=stop_tokens
+                )
+                text = output["choices"][0]["text"].strip()
+                return text if text else None
+            except Exception as e:
+                print(f"[OfflineVocalCoach] In-process inference error: {e}", file=sys.stderr)
+
+        return None
 
     def generate_take_debrief(
         self,
@@ -211,20 +385,10 @@ class OfflineVocalCoach:
 
         # Build prompt
         prompt = self._build_debrief_prompt(report_data, track_info, profile_data, progression_data)
-
-        try:
-            output = self._llm(
-                prompt,
-                max_tokens=650,
-                temperature=0.7,
-                top_p=0.9,
-                stop=["<|im_end|>", "<|endoftext|>"]
-            )
-            text = output["choices"][0]["text"].strip()
-            return text if text else self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
-        except Exception as e:
-            print(f"[OfflineVocalCoach] Inference error: {e}", file=sys.stderr)
-            return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
+        result = self._query_completion(prompt, max_tokens=650, temperature=0.7)
+        if result:
+            return result
+        return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
 
     def chat_with_coach(
         self,
@@ -237,25 +401,26 @@ class OfflineVocalCoach:
         Interactive conversational reply regarding the take and vocal mechanics.
         """
         if not self.load_engine():
+            if not self.is_installed():
+                return (
+                    "✦ Maestro Tiki: No offline AI model is installed yet. Open Settings (⚙️) -> "
+                    "'Offline AI Vocal Coach' to download the model for 100% private, on-device coaching!"
+                )
             return (
-                "Offline engine is operating in fallback mode. (Install 'llama-cpp-python' to enable full "
-                "local LLM dialogue). Based on your take metrics, focus on steady ribcage breath pressure "
-                "and keeping vowel resonance centered in your facial mask!"
+                "✦ Maestro Tiki: Offline AI engine is initializing. In the meantime, remember: "
+                "focus on steady ribcage breath support and keeping vowel resonance centered in your facial mask!"
             )
 
         prompt = self._build_chat_prompt(user_message, conversation_history, report_data, track_info)
-
-        try:
-            output = self._llm(
-                prompt,
-                max_tokens=280,
-                temperature=0.7,
-                top_p=0.9,
-                stop=["<|im_end|>", "<|endoftext|>", "Singer:"]
-            )
-            return output["choices"][0]["text"].strip()
-        except Exception as e:
-            return f"Coach note: Keep practicing with relaxed throat and diaphragmatic breath support! (Error: {e})"
+        result = self._query_completion(
+            prompt,
+            max_tokens=280,
+            temperature=0.7,
+            stop=["<|im_end|>", "<|endoftext|>", "Singer:"]
+        )
+        if result:
+            return result
+        return "Coach note: Keep practicing with relaxed throat and diaphragmatic breath support!"
 
     def _build_debrief_prompt(
         self,
@@ -453,23 +618,12 @@ class OfflineVocalCoach:
             return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
 
         prompt = self._build_warmup_prompt(profile_data, track_info, key_shift, climax_note)
-
-        try:
-            output = self._llm(
-                prompt,
-                max_tokens=650,
-                temperature=0.6,
-                top_p=0.9,
-                stop=["<|im_end|>", "<|endoftext|>"]
-            )
-            text = output["choices"][0]["text"].strip()
+        text = self._query_completion(prompt, max_tokens=650, temperature=0.6)
+        if text:
             parsed = self._parse_warmup_json(text, max_ceiling=ceiling)
             if parsed and len(parsed) >= 2:
                 return parsed
-            return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
-        except Exception as e:
-            print(f"[OfflineVocalCoach] Warmup generation error: {e}", file=sys.stderr)
-            return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
+        return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
 
     def _build_warmup_prompt(
         self,

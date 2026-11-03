@@ -58,6 +58,10 @@ if (-not (Test-Path "$ScriptDir\bin\mpv.exe")) {
     Write-Host "`n[ERROR] mpv.exe was not found in $ScriptDir\bin after staging!" -ForegroundColor Red
     exit 1
 }
+if (-not (Test-Path "$ScriptDir\bin\llama-server.exe")) {
+    Write-Host "`n[ERROR] llama-server.exe was not found in $ScriptDir\bin after staging!" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "`n[4/5] Building TikiRehearsalLounge standalone bundle via PyInstaller..." -ForegroundColor Yellow
 
