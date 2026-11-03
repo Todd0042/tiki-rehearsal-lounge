@@ -121,8 +121,25 @@ class AudioRecorder:
         return None
 
     def _build_record_command(self) -> Optional[list[str]]:
-        """Selects the cleanest capture command on the system."""
-        # 1. Native PipeWire pw-record (Raw 16-bit PCM to stdout)
+        """Selects the cleanest capture command on the system across platforms."""
+        from config import get_bundled_binary_path
+        ffmpeg_bin = get_bundled_binary_path("ffmpeg") or shutil.which("ffmpeg")
+
+        # 1. Windows: Native WASAPI capture via bundled/system FFmpeg
+        if sys.platform == "win32" and ffmpeg_bin:
+            return [
+                str(ffmpeg_bin),
+                "-hide_banner",
+                "-loglevel", "quiet",
+                "-f", "wasapi",
+                "-i", "default",
+                "-ac", str(self.channels),
+                "-ar", str(self.sample_rate),
+                "-f", "s16le",
+                "-"
+            ]
+
+        # 2. Linux: Native PipeWire pw-record (Raw 16-bit PCM to stdout)
         if shutil.which("pw-record"):
             return [
                 "pw-record",
@@ -132,10 +149,10 @@ class AudioRecorder:
                 "-"
             ]
 
-        # 2. FFmpeg from pulse source
-        if shutil.which("ffmpeg"):
+        # 3. Linux: FFmpeg from pulse source
+        if ffmpeg_bin:
             return [
-                "ffmpeg",
+                str(ffmpeg_bin),
                 "-hide_banner",
                 "-loglevel", "quiet",
                 "-f", "pulse",
@@ -146,7 +163,7 @@ class AudioRecorder:
                 "-"
             ]
 
-        # 3. ALSA arecord
+        # 4. Linux: ALSA arecord
         if shutil.which("arecord"):
             return [
                 "arecord",

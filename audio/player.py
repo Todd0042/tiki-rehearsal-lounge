@@ -26,11 +26,25 @@ class RehearsalPlayer:
         self.on_finished = on_finished
         self._process: Optional[subprocess.Popen] = None
         self._ipc_socket_path = Path(f"/tmp/tiki_rehearsal_mpv_{os.getpid()}.sock")
+        self._ipc_pipe_name = rf"\\.\pipe\tiki_rehearsal_mpv_{os.getpid()}"
         self._monitor_thread: Optional[threading.Thread] = None
         self._is_playing = False
         self._current_file: Optional[Path] = None
         self._current_key_shift: int = 0
-        self._mpv_path = shutil.which("mpv") or "/usr/bin/mpv"
+        self._mpv_path = self._find_player_bin()
+
+    def _find_player_bin(self) -> str:
+        from config import get_bundled_binary_path
+        cand = get_bundled_binary_path("mpv")
+        if cand:
+            return str(cand)
+        cand = shutil.which("mpv")
+        if cand:
+            return str(cand)
+        cand = get_bundled_binary_path("ffplay")
+        if cand:
+            return str(cand)
+        return shutil.which("ffplay") or "mpv"
 
     @property
     def is_playing(self) -> bool:
@@ -63,8 +77,8 @@ class RehearsalPlayer:
         self._current_file = target
         self._current_key_shift = int(max(-3, min(3, key_shift)))
 
-        # Clean old socket if exists
-        if self._ipc_socket_path.exists():
+        # Clean old socket if exists (Linux)
+        if sys.platform != "win32" and self._ipc_socket_path.exists():
             try:
                 self._ipc_socket_path.unlink()
             except Exception:
@@ -75,20 +89,32 @@ class RehearsalPlayer:
         pitch_scale = 2.0 ** (self._current_key_shift / 12.0)
         af_arg = f"rubberband=pitch-scale={pitch_scale:.6f}:pitch=consistency:formant=preserved:engine=finer"
 
-        cmd = [
-            self._mpv_path,
-            str(target),
-            f"--input-ipc-server={self._ipc_socket_path}",
-            f"--af={af_arg}",
-            "--title=🌴 Tiki Rehearsal Stage",
-            "--keep-open=no",
-            "--force-window=yes",
-            "--geometry=70%:70%",
-            "--autofit=960x540",
-        ]
-
-        if fullscreen:
-            cmd.append("--fs")
+        is_ffplay = "ffplay" in Path(self._mpv_path).name.lower()
+        if is_ffplay:
+            cmd = [
+                self._mpv_path,
+                str(target),
+                "-af", af_arg,
+                "-window_title", "🌴 Tiki Rehearsal Stage",
+                "-autoexit"
+            ]
+            if fullscreen:
+                cmd.append("-fs")
+        else:
+            ipc_arg = f"--input-ipc-server={self._ipc_pipe_name}" if sys.platform == "win32" else f"--input-ipc-server={self._ipc_socket_path}"
+            cmd = [
+                self._mpv_path,
+                str(target),
+                ipc_arg,
+                f"--af={af_arg}",
+                "--title=🌴 Tiki Rehearsal Stage",
+                "--keep-open=no",
+                "--force-window=yes",
+                "--geometry=70%:70%",
+                "--autofit=960x540",
+            ]
+            if fullscreen:
+                cmd.append("--fs")
 
         try:
             self._process = subprocess.Popen(
@@ -168,14 +194,26 @@ class RehearsalPlayer:
                 print(f"[RehearsalPlayer] Error in on_finished callback: {e}", file=sys.stderr)
 
     def _send_ipc_command(self, command: list) -> Optional[dict]:
-        """Sends a JSON command to mpv IPC Unix socket."""
+        """Sends a JSON command to mpv IPC socket (Linux) or Named Pipe (Windows)."""
+        payload = json.dumps({"command": command}) + "\n"
+
+        if sys.platform == "win32":
+            try:
+                with open(self._ipc_pipe_name, "r+b", buffering=0) as pipe:
+                    pipe.write(payload.encode("utf-8"))
+                    line = pipe.readline()
+                    if line:
+                        return json.loads(line.decode("utf-8").strip())
+            except Exception:
+                pass
+            return None
+
         if not self._ipc_socket_path.exists():
             return None
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(0.5)
                 client.connect(str(self._ipc_socket_path))
-                payload = json.dumps({"command": command}) + "\n"
                 client.sendall(payload.encode("utf-8"))
                 resp_data = client.recv(4096)
                 if resp_data:

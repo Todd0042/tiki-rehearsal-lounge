@@ -87,6 +87,15 @@ class StudioCockpitWindow:
         self.root.minsize(880, 680)
         self.root.configure(bg=COLOR_BG_MAIN)
 
+        # Set application icon
+        try:
+            icon_png = Path(__file__).resolve().parent.parent / "static" / "tiki-icon.png"
+            if icon_png.exists():
+                self._app_icon = tk.PhotoImage(file=str(icon_png))
+                self.root.iconphoto(True, self._app_icon)
+        except Exception:
+            pass
+
         # Core Engines
         self.db = TikiDatabaseBridge()
         self.calibrator = VocalCalibrationManager()

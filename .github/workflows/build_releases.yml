@@ -59,17 +59,75 @@ jobs:
           path: dist/*.AppImage
           retention-days: 7
 
+  build-windows:
+    name: Build Windows Standalone & Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Determine Version
+        id: ver
+        shell: bash
+        run: |
+          RAW_TAG="${{ github.ref_name }}"
+          INPUT_VER="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT_VER" ]; then
+            V="$INPUT_VER"
+          elif [[ "$RAW_TAG" =~ ^v[0-9] ]]; then
+            V="${RAW_TAG#v}"
+          else
+            V="1.0.0"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Inno Setup Compiler
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Build Windows Standalone & Installer
+        shell: powershell
+        run: |
+          & packaging\windows\build_windows.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Upload Windows Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-rehearsal-installer
+          path: packaging/windows/dist_installer/*.exe
+          retention-days: 7
+
+      - name: Upload Windows Portable Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-rehearsal-portable
+          path: packaging/windows/dist/*.zip
+          retention-days: 7
+
   publish-github-release:
     name: Publish GitHub Release
-    needs: [build-linux-appimage]
+    needs: [build-linux-appimage, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
     steps:
-      - name: Download AppImage Artifact
+      - name: Download All Release Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: linux-rehearsal-appimage
           path: release_assets/
+
+      - name: Consolidate Release Assets
+        shell: bash
+        run: |
+          mkdir -p final_assets/
+          find release_assets/ -type f \( -name "*.AppImage" -o -name "*.exe" -o -name "*.zip" \) -exec cp -v {} final_assets/ \;
+          ls -la final_assets/
 
       - name: Determine Release Tag
         id: rel_tag
@@ -90,11 +148,11 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: release_assets/*
+          files: final_assets/*
 
   itch-deploy:
     name: Deploy to Itch.io (Butler)
-    needs: [build-linux-appimage, publish-github-release]
+    needs: [build-linux-appimage, build-windows, publish-github-release]
     runs-on: ubuntu-latest
     env:
       BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
@@ -110,12 +168,11 @@ jobs:
             echo "has_key=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download AppImage Artifact
+      - name: Download All Artifacts
         if: steps.check_auth.outputs.has_key == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: linux-rehearsal-appimage
-          path: dist/
+          path: itch_artifacts/
 
       - name: Install Butler
         if: steps.check_auth.outputs.has_key == 'true'
@@ -127,7 +184,7 @@ jobs:
           rm -f butler.zip
           butler -V
 
-      - name: Push to Itch.io (rehearsal-linux)
+      - name: Push to Itch.io Channels
         if: steps.check_auth.outputs.has_key == 'true'
         shell: bash
         run: |
@@ -142,9 +199,25 @@ jobs:
 
           echo "=========================================================="
           echo "Deploying Tiki Rehearsal Lounge v$REL_VER to Itch.io"
-          echo "Channel: todd0042/tiki-karaoke-lounge:rehearsal-linux"
+          echo "Target Page: todd0042/tiki-karaoke-lounge"
           echo "=========================================================="
 
-          butler push dist/*.AppImage todd0042/tiki-karaoke-lounge:rehearsal-linux --userversion "$REL_VER"
-          echo "✅ Itch.io deployment completed successfully!"
+          # 1. Linux AppImage
+          for f in $(find itch_artifacts/ -name "*.AppImage"); do
+            echo "Pushing Linux AppImage: $f"
+            butler push "$f" todd0042/tiki-karaoke-lounge:rehearsal-linux --userversion "$REL_VER"
+          done
 
+          # 2. Windows Turnkey Installer (.exe)
+          for f in $(find itch_artifacts/ -name "*Setup*.exe"); do
+            echo "Pushing Windows Installer: $f"
+            butler push "$f" todd0042/tiki-karaoke-lounge:rehearsal-windows --userversion "$REL_VER"
+          done
+
+          # 3. Windows Portable (.zip)
+          for f in $(find itch_artifacts/ -name "*Portable*.zip"); do
+            echo "Pushing Windows Portable: $f"
+            butler push "$f" todd0042/tiki-karaoke-lounge:rehearsal-windows-portable --userversion "$REL_VER"
+          done
+
+          echo "✅ All Itch.io deployments completed successfully!"

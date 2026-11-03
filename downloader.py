@@ -176,7 +176,8 @@ def normalize_audio_loudness(input_path: Path, output_path: Path, target_lufs: f
     Performs EBU R128 loudness normalization via FFmpeg loudnorm filter,
     copying video stream losslessly (-c:v copy) and re-encoding audio to 192k AAC.
     """
-    ffmpeg_bin = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    from config import get_bundled_binary_path
+    ffmpeg_bin = str(get_bundled_binary_path("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
     cmd = [
         ffmpeg_bin, "-y",
         "-i", str(input_path),
@@ -264,7 +265,8 @@ class TrackDownloader:
     def __init__(self, db_bridge: Optional[TikiDatabaseBridge] = None):
         self.db = db_bridge or TikiDatabaseBridge()
         self.ytdlp_bin = find_ytdlp_binary()
-        self.ffmpeg_bin = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+        from config import get_bundled_binary_path
+        self.ffmpeg_bin = str(get_bundled_binary_path("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
 
     def search_youtube(
         self,

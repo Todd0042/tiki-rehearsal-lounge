@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import sys
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -19,28 +21,67 @@ STUDIO_VERSION = "1.0.0"
 
 # User Data Directories
 HOME_DIR = Path.home()
-CONFIG_HOME = Path(os.getenv("XDG_CONFIG_HOME", str(HOME_DIR / ".config")))
+if sys.platform == "win32":
+    CONFIG_HOME = Path(os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or (HOME_DIR / "AppData" / "Local"))
+else:
+    CONFIG_HOME = Path(os.getenv("XDG_CONFIG_HOME", str(HOME_DIR / ".config")))
+
 STUDIO_CONFIG_DIR = CONFIG_HOME / "TikiRehearsalLounge"
 STUDIO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 STUDIO_CONFIG_PATH = STUDIO_CONFIG_DIR / "config.json"
 
 VOCAL_PROFILE_PATH = STUDIO_CONFIG_DIR / "vocal_profile.json"
-TEMP_TAKES_DIR = Path("/tmp/tiki_rehearsal_takes")
+TEMP_TAKES_DIR = Path(tempfile.gettempdir()) / "tiki_rehearsal_takes"
 TEMP_TAKES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_bundled_binary_path(binary_name: str) -> Optional[Path]:
+    """
+    Finds a bundled binary (e.g. ffmpeg, ffprobe, mpv) in PyInstaller bundle,
+    local bin/ directory, or system PATH with platform extension awareness.
+    """
+    ext = ".exe" if sys.platform == "win32" else ""
+    target_name = f"{binary_name}{ext}" if not binary_name.lower().endswith(ext) else binary_name
+
+    # 1. Check PyInstaller _MEIPASS
+    if hasattr(sys, "_MEIPASS"):
+        for sub in ["bin", "_internal/bin", ""]:
+            cand = Path(sys._MEIPASS) / sub / target_name if sub else Path(sys._MEIPASS) / target_name
+            if cand.is_file():
+                return cand
+
+    # 2. Check local application bin/
+    app_root = Path(__file__).resolve().parent
+    for sub in ["bin", "usr/bin", ""]:
+        cand = app_root / sub / target_name if sub else app_root / target_name
+        if cand.is_file():
+            return cand
+
+    # 3. Check system PATH
+    sys_path = shutil.which(target_name) or shutil.which(binary_name)
+    if sys_path:
+        return Path(sys_path)
+
+    return None
 
 
 def find_tiki_karaoke_config_path() -> Optional[Path]:
     """Finds Tiki Karaoke's config.json from AppImage/System, local, or home paths."""
-    candidates = [
+    appdata = os.getenv("APPDATA")
+    localappdata = os.getenv("LOCALAPPDATA")
+    raw_candidates = [
         CONFIG_HOME / "TikiKaraoke" / "config.json",
         HOME_DIR / ".config" / "TikiKaraoke" / "config.json",
+        Path(appdata) / "TikiKaraoke" / "config.json" if appdata else None,
+        Path(localappdata) / "TikiKaraoke" / "config.json" if localappdata else None,
         HOME_DIR / "Music" / "Karaoke" / "Tiki" / "db" / "config.json",
         HOME_DIR / "Music" / "Karaoke" / "Tiki" / "config.json",
+        HOME_DIR / "Documents" / "tiki-karaoke" / "data" / "config.json",
         Path("/home/todd/Documents/tiki-karaoke/data/config.json"),
         Path("../tiki-karaoke/config.json"),
     ]
-    for p in candidates:
-        if p.is_file():
+    for p in raw_candidates:
+        if p and p.is_file():
             return p
     return None
 

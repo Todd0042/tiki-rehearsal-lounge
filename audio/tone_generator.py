@@ -15,6 +15,7 @@ Tiki Rehearsal Lounge - Multi-Instrument Tone Generator & Warmup Pitch Analyzer
 
 from __future__ import annotations
 import os
+import sys
 import re
 import math
 import wave
@@ -235,7 +236,12 @@ class ToneSynthesizer:
         self._find_audio_player()
 
     def _find_audio_player(self):
-        """Discovers the best low-latency CLI audio player on Linux."""
+        """Discovers the best low-latency audio player across platforms."""
+        if sys.platform == "win32":
+            self._player_bin = "winsound"
+            self._player_type = "winsound"
+            return
+
         for player in ["paplay", "pw-play", "aplay"]:
             path = shutil.which(player)
             if path:
@@ -331,6 +337,14 @@ class ToneSynthesizer:
 
     def _stop_tone_proc(self):
         """Silences any running single-tone audio process without halting pattern sequences."""
+        if sys.platform == "win32" and self._player_type == "winsound":
+            try:
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+            return
+
         if self._active_play_proc and self._active_play_proc.poll() is None:
             try:
                 self._active_play_proc.terminate()
@@ -346,6 +360,14 @@ class ToneSynthesizer:
             self._stop_tone_proc()
 
         wav_path = self.get_or_render_tone_file(note_name, instrument)
+
+        if sys.platform == "win32" and self._player_type == "winsound":
+            try:
+                import winsound
+                winsound.PlaySound(str(wav_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            except Exception as e:
+                print(f"[ToneSynthesizer] winsound play error: {e}")
+            return
 
         cmd = [self._player_bin, str(wav_path)]
         if self._player_type == "aplay":
