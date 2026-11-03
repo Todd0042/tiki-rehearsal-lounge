@@ -259,6 +259,7 @@ class VocalTakeAnalyzer:
         self,
         singer_wav: Path,
         reference_wav: Optional[Path] = None,
+        playback_audio_path: Optional[Path] = None,
         key_shift: int = 0,
         progress_cb: Optional[Callable[[float, str], None]] = None
     ) -> TakeAnalysisReport:
@@ -272,17 +273,39 @@ class VocalTakeAnalyzer:
         singer_audio, sr = read_wav_mono(singer_wav)
         s_times, s_pitches = extract_pitch_contour(singer_audio, sr, voicing_threshold=0.35)
 
+        # 0. Suppress acoustic speaker bleed if playback track provided
+        if playback_audio_path and Path(playback_audio_path).exists():
+            if progress_cb:
+                progress_cb(0.18, "Analyzing and filtering acoustic speaker bleed...")
+            s_pitches = self._suppress_speaker_bleed(
+                singer_audio=singer_audio,
+                sr=sr,
+                s_times=s_times,
+                s_pitches=s_pitches,
+                playback_path=Path(playback_audio_path),
+                key_shift=key_shift
+            )
+
         s_voiced_mask = s_pitches > 0
         s_voiced = s_pitches[s_voiced_mask]
 
         if len(s_voiced) < 20:
             if progress_cb:
                 progress_cb(1.00, "Analysis complete (no vocal signal detected).")
-            # Fallback for silent / inaudible take
+            # Fallback for silent / inaudible take or pure speaker bleed
+            is_bleed_eliminated = (playback_audio_path is not None)
+            verdict = "No Singer Detected (Speaker Bleed Filtered Out)" if is_bleed_eliminated else "No Vocal Signal Detected"
+            feedback_msg = (
+                "No active vocal singing detected. The microphone only captured audio bleeding "
+                "from your speakers or backing track. Please sing directly into the microphone, "
+                "or use headphones for studio-grade isolation."
+                if is_bleed_eliminated else
+                "No sustained vocal audio was detected in this take."
+            )
             return TakeAnalysisReport(
                 pitch_accuracy_pct=0.0,
                 intonation_cents=0.0,
-                intonation_verdict="No Vocal Signal Detected",
+                intonation_verdict=verdict,
                 rhythm_offset_ms=0.0,
                 rhythm_verdict="N/A",
                 vibrato_rate_hz=0.0,
@@ -307,7 +330,7 @@ class VocalTakeAnalyzer:
                 vocal_fry_pct=0.0,
                 vocal_fry_verdict="N/A",
                 overall_score=0,
-                coach_feedback=["No sustained vocal audio was detected in this take."],
+                coach_feedback=[feedback_msg],
                 phrase_highlights=[],
                 phrase_struggles=[]
             )
@@ -504,6 +527,86 @@ class VocalTakeAnalyzer:
             phrase_highlights=phrase_highlights,
             phrase_struggles=phrase_struggles
         )
+
+    def _suppress_speaker_bleed(
+        self,
+        singer_audio: np.ndarray,
+        sr: int,
+        s_times: np.ndarray,
+        s_pitches: np.ndarray,
+        playback_path: Path,
+        key_shift: int = 0
+    ) -> np.ndarray:
+        """
+        Detects and masks out acoustic audio bleed from speakers/loopback playback.
+        Identifies frames where mic pitch matches backing track within +/-20 cents
+        at moderate-to-low ambient bleed levels, preventing silent takes from scoring.
+        """
+        try:
+            playback_audio, _ = load_audio_mono(
+                playback_path,
+                sr=sr,
+                max_seconds=float(len(singer_audio) / sr) + 2.0
+            )
+            if len(playback_audio) < sr * 2:
+                return s_pitches
+
+            # Extract pitch contour of playback audio
+            _, ref_pitches = extract_pitch_contour(playback_audio, sr, voicing_threshold=0.30)
+            if key_shift != 0:
+                ref_pitches = np.where(ref_pitches > 0, ref_pitches * (2.0 ** (key_shift / 12.0)), 0.0)
+
+            hop_size = 256
+            n_frames = min(len(s_pitches), len(ref_pitches))
+            if n_frames < 20:
+                return s_pitches
+
+            # Calculate frame RMS for both signals
+            s_rms = np.zeros(n_frames, dtype=np.float32)
+            ref_rms = np.zeros(n_frames, dtype=np.float32)
+            for i in range(n_frames):
+                st = i * hop_size
+                en = st + hop_size
+                if en <= len(singer_audio):
+                    s_rms[i] = np.sqrt(np.mean(singer_audio[st:en] ** 2))
+                if en <= len(playback_audio):
+                    ref_rms[i] = np.sqrt(np.mean(playback_audio[st:en] ** 2))
+
+            # Find approximate acoustic speaker-to-mic latency via envelope cross-correlation
+            # Search lag window from 0 to ~200ms
+            max_lag_frames = int(0.20 * sr / hop_size)
+            search_len = min(n_frames, int(15.0 * sr / hop_size))
+            best_lag = 0
+            if search_len > max_lag_frames:
+                s_env = s_rms[:search_len]
+                r_env = ref_rms[:search_len]
+                corr = np.correlate(s_env, r_env, mode="full")
+                mid = len(r_env) - 1
+                lags = np.arange(0, max_lag_frames)
+                lag_corrs = [corr[mid + l] if (mid + l) < len(corr) else 0.0 for l in lags]
+                best_lag = int(lags[np.argmax(lag_corrs)])
+
+            # Estimate ambient bleed coupling ratio: median(s_rms / ref_rms)
+            r_active = ref_rms > 0.01
+            coupling = float(np.median(s_rms[r_active] / (ref_rms[r_active] + 1e-6))) if np.any(r_active) else 0.15
+            coupling = float(np.clip(coupling, 0.01, 0.40))
+
+            cleaned_pitches = np.copy(s_pitches)
+            for i in range(n_frames):
+                if cleaned_pitches[i] <= 0:
+                    continue
+                ref_idx = i - best_lag
+                if 0 <= ref_idx < len(ref_pitches) and ref_pitches[ref_idx] > 0:
+                    cents_diff = abs(cents_deviation(cleaned_pitches[i], ref_pitches[ref_idx]))
+                    if cents_diff <= 22.0:
+                        expected_bleed = ref_rms[ref_idx] * coupling * 1.8
+                        if s_rms[i] <= max(0.045, expected_bleed):
+                            cleaned_pitches[i] = 0.0
+
+            return cleaned_pitches
+        except Exception as e:
+            print(f"[VocalTakeAnalyzer] Bleed suppression notice: {e}", file=sys.stderr)
+            return s_pitches
 
     def _analyze_against_grid(self, pitches: np.ndarray) -> Tuple[float, float, float]:
         """Pitch accuracy when comparing against nearest equal-tempered chromatic notes."""

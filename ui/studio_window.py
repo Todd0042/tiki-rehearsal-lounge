@@ -53,6 +53,7 @@ from config import (
     find_tiki_karaoke_config_path
 )
 from db.bridge import TikiDatabaseBridge
+from db.progression_db import ProgressionDatabase
 from audio.recorder import AudioRecorder
 from audio.calibration import (
     VocalCalibrationManager,
@@ -98,6 +99,7 @@ class StudioCockpitWindow:
 
         # Core Engines
         self.db = TikiDatabaseBridge()
+        self.progression_db = ProgressionDatabase()
         self.calibrator = VocalCalibrationManager()
         self.vocal_profile: Optional[VocalProfile] = self.calibrator.load_profile()
         self.analyzer = VocalTakeAnalyzer(vocal_profile=self.vocal_profile)
@@ -526,7 +528,17 @@ class StudioCockpitWindow:
             pady=10,
             command=self._on_toggle_rehearsal
         )
-        self.btn_record_take.pack(fill="x", pady=(0, 8))
+        self.btn_record_take.pack(fill="x", pady=(0, 4))
+
+        tk.Label(
+            transport_card,
+            text="🎧 Tip: Headphones prevent speaker audio bleed for studio-accurate scoring.",
+            font=("Helvetica", 7, "italic"),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_BG_CARD,
+            wraplength=320,
+            justify="center"
+        ).pack(fill="x", pady=(0, 6))
 
         # Multi-Stage Analysis Progress Bar (Shown during DSP analysis)
         self.analysis_prog_frame = tk.Frame(transport_card, bg="#1a0c28", bd=1, relief="solid", padx=10, pady=8)
@@ -2212,9 +2224,12 @@ class StudioCockpitWindow:
                 self.lbl_status.config(text=f"Analyzing take ({int(pct * 100)}%): {step_msg}")
             self.root.after_idle(_ui)
 
-        # Reference sing-along vocal if available
+        # Playback track path for acoustic bleed cancellation & reference sing-along if available
+        playback_path = None
         ref_path = None
         if self.selected_track:
+            if self.selected_track.get("local_path"):
+                playback_path = Path(self.selected_track["local_path"])
             sa_meta = self.db.find_sing_along_equivalent(
                 self.selected_track.get("title", ""),
                 self.selected_track.get("artist", "")
@@ -2225,6 +2240,7 @@ class StudioCockpitWindow:
         report = self.analyzer.analyze_take(
             singer_wav=take_wav,
             reference_wav=ref_path,
+            playback_audio_path=playback_path,
             key_shift=self.current_key_shift,
             progress_cb=_prog_cb
         )
@@ -2631,15 +2647,44 @@ class StudioCockpitWindow:
         if not self.offline_coach.is_installed():
             return
 
+        # If pure silence or filtered bleed, deliver concise coach advice immediately
+        if report.overall_score == 0:
+            msg = report.coach_feedback[0] if report.coach_feedback else "No vocal singing detected."
+            self.lbl_ai_debrief_text.config(text=f"✦ Maestro Tiki: {msg}", fg=COLOR_GOLD)
+            return
+
         self.lbl_ai_debrief_text.config(text="✦ Maestro Tiki is analyzing your take metrics offline...", fg=COLOR_CYAN)
 
         def _worker():
+            track_title = self.selected_track.get("title", "Rehearsal Track") if self.selected_track else "Rehearsal Track"
+            progression_data = self.progression_db.build_llm_progression_context(
+                track_title=track_title,
+                current_score=report.overall_score,
+                current_pitch_acc=report.pitch_accuracy_pct,
+                current_breath=report.breath_support_pct
+            )
             profile_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
             debrief = self.offline_coach.generate_take_debrief(
                 report.to_dict(),
                 self.selected_track,
-                profile_dict
+                profile_dict,
+                progression_data=progression_data
             )
+            # Record take in progression database
+            self.progression_db.record_take(
+                track_title=track_title,
+                overall_score=report.overall_score,
+                pitch_accuracy_pct=report.pitch_accuracy_pct,
+                intonation_cents=report.intonation_cents,
+                rhythm_offset_ms=report.rhythm_offset_ms,
+                breath_support_pct=report.breath_support_pct,
+                singers_formant_ratio=report.singers_formant_ratio,
+                balanced_onsets_pct=report.balanced_onsets_pct,
+                track_id=self.selected_track.get("id", 0) if self.selected_track else 0,
+                track_artist=self.selected_track.get("artist", "") if self.selected_track else "",
+                key_shift=self.current_key_shift
+            )
+
             def _update():
                 self.lbl_ai_debrief_text.config(text=debrief, fg=COLOR_TEXT_MAIN)
             self.root.after_idle(_update)
@@ -4140,7 +4185,7 @@ class StudioCockpitWindow:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("⚙️ Studio Settings & Storage Configuration")
-        dlg.geometry("580x640")
+        dlg.geometry("580x710")
         dlg.configure(bg=COLOR_BG_MAIN)
         dlg.transient(self.root)
         dlg.grab_set()
@@ -4151,7 +4196,7 @@ class StudioCockpitWindow:
         ry = self.root.winfo_rooty()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
-        dlg.geometry(f"+{rx + max(0, (rw - 580) // 2)}+{ry + max(0, (rh - 640) // 2)}")
+        dlg.geometry(f"+{rx + max(0, (rw - 580) // 2)}+{ry + max(0, (rh - 710) // 2)}")
 
         # Header Frame
         hdr = tk.Frame(dlg, bg="#1a1025", padx=18, pady=14)
@@ -4357,6 +4402,44 @@ class StudioCockpitWindow:
                 pady=3,
                 command=_settings_download
             ).pack(side="right")
+
+        # 5. Rehearsal Progression History Card
+        hist_card = tk.LabelFrame(
+            form,
+            text=" 📈 REHEARSAL PROGRESSION HISTORY ",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_GOLD,
+            bg="#150a22",
+            padx=12,
+            pady=8
+        )
+        hist_card.pack(fill="x", pady=(0, 10))
+
+        hist_stats = self.progression_db.get_lifetime_stats()
+        tk.Label(
+            hist_card,
+            text=f"Total: {hist_stats['total_takes']} takes ({hist_stats['unique_songs']} songs) • Auto-pruning: max 15/song",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MAIN,
+            bg="#150a22"
+        ).pack(side="left")
+
+        def _clear_history():
+            if messagebox.askyesno("Reset Progression History", "Are you sure you want to clear your saved rehearsal progression history?", parent=dlg):
+                self.progression_db.clear_history()
+                dlg.destroy()
+                messagebox.showinfo("History Cleared", "Rehearsal progression history has been reset.", parent=self.root)
+
+        tk.Button(
+            hist_card,
+            text="🗑️ Reset History",
+            font=("Helvetica", 8, "bold"),
+            bg="#401018",
+            fg=COLOR_DANGER,
+            padx=10,
+            pady=3,
+            command=_clear_history
+        ).pack(side="right")
 
         # Status / Feedback label
         lbl_msg = tk.Label(form, text="", font=("Helvetica", 8, "bold"), fg=COLOR_DANGER, bg=COLOR_BG_MAIN)

@@ -199,30 +199,32 @@ class OfflineVocalCoach:
         self,
         report_data: Dict[str, Any],
         track_info: Optional[Dict[str, Any]] = None,
-        profile_data: Optional[Dict[str, Any]] = None
+        profile_data: Optional[Dict[str, Any]] = None,
+        progression_data: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Synthesizes raw DSP metrics into an encouraging, pedagogical 2-paragraph debrief.
+        Synthesizes raw DSP metrics into an encouraging, pedagogical debrief
+        incorporating phrase-level moments and vocal progression trajectory.
         """
         if not self.load_engine():
-            return self._generate_rule_based_debrief(report_data, track_info, profile_data)
+            return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
 
         # Build prompt
-        prompt = self._build_debrief_prompt(report_data, track_info, profile_data)
+        prompt = self._build_debrief_prompt(report_data, track_info, profile_data, progression_data)
 
         try:
             output = self._llm(
                 prompt,
-                max_tokens=550,
+                max_tokens=650,
                 temperature=0.7,
                 top_p=0.9,
                 stop=["<|im_end|>", "<|endoftext|>"]
             )
             text = output["choices"][0]["text"].strip()
-            return text if text else self._generate_rule_based_debrief(report_data, track_info, profile_data)
+            return text if text else self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
         except Exception as e:
             print(f"[OfflineVocalCoach] Inference error: {e}", file=sys.stderr)
-            return self._generate_rule_based_debrief(report_data, track_info, profile_data)
+            return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
 
     def chat_with_coach(
         self,
@@ -259,7 +261,8 @@ class OfflineVocalCoach:
         self,
         report: Dict[str, Any],
         track_info: Optional[Dict[str, Any]],
-        profile: Optional[Dict[str, Any]]
+        profile: Optional[Dict[str, Any]],
+        progression_data: Optional[Dict[str, Any]] = None
     ) -> str:
         track_title = track_info.get("title", "Rehearsal Song") if track_info else "Rehearsal Song"
         track_artist = track_info.get("artist", "") if track_info else ""
@@ -280,6 +283,24 @@ class OfflineVocalCoach:
             for s in struggles:
                 phrase_section += f"- [{s['timestamp']}] ({s['note_span']}): {s['detail']} | Mechanical Cue: {s.get('cue', '')}\n"
 
+        prog_section = ""
+        if progression_data:
+            take_num = progression_data.get("song_take_number", 1)
+            delta_score = progression_data.get("delta_score", 0)
+            delta_pitch = progression_data.get("delta_pitch_pct", 0.0)
+            recent = progression_data.get("recent_take_summaries", [])
+            has_history = progression_data.get("has_prior_history", False)
+
+            prog_section += f"\nRehearsal Progression Context (Take #{take_num} on this track):\n"
+            if has_history:
+                prog_section += f"- Score change from immediately prior take: {delta_score:+d} points\n"
+                prog_section += f"- Pitch accuracy change: {delta_pitch:+0.1f}%\n"
+                if recent:
+                    prog_section += f"- Recent history on this track: {'; '.join(recent)}\n"
+            else:
+                prog_section += "- This is your baseline take (Attempt #1) for this track.\n"
+            prog_section += f"- Total practice takes in studio history: {progression_data.get('studio_total_takes', 1)}\n"
+
         prompt = (
             f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n"
@@ -292,10 +313,12 @@ class OfflineVocalCoach:
             f"- Glottal Attack: {report.get('onset_attack_verdict', '')}\n"
             f"- Key Shift: {shift:+d} semitones (Recommended: {rec_shift:+d} semitones)\n"
             f"{phrase_section}\n"
+            f"{prog_section}\n"
             f"Give me an encouraging, human-grade, in-depth studio debrief structured with:\n"
             f"1. 🌟 **What Clicked ([MM:SS])**: Detail the specific timestamped passages where I excelled, the notes, and why the tone worked.\n"
             f"2. ⚠️ **Where It Slipped ([MM:SS])**: Detail the specific timestamped passages where pitch wandered or breath sagged, explaining the acoustic cause.\n"
             f"3. 🛠️ **Targeted Physical Adjustments**: Exactly 2 actionable mechanical cues (ribcage expansion, soft palate lift, mask placement) to fix the struggle moments on my next take.\n"
+            f"4. 📈 **Vocal Progression & Growth Trajectory**: A 2-sentence summary of my trajectory across takes (celebrating improvements or highlighting what to stabilize next). If Attempt #1, establish my starting benchmark.\n"
             f"Speak directly to me like an expert mentor in the studio lounge. Do NOT just recite global percentages.<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
@@ -338,9 +361,10 @@ class OfflineVocalCoach:
     def _generate_rule_based_debrief(
         report: Dict[str, Any],
         track_info: Optional[Dict[str, Any]],
-        profile: Optional[Dict[str, Any]]
+        profile: Optional[Dict[str, Any]],
+        progression_data: Optional[Dict[str, Any]] = None
     ) -> str:
-        """High-grade pedagogical debrief synthesis incorporating timestamped song moments."""
+        """High-grade pedagogical debrief synthesis incorporating timestamped song moments and progression."""
         score = report.get("overall_score", 0)
         pitch = report.get("pitch_accuracy_pct", 0)
         into = report.get("intonation_cents", 0.0)
@@ -383,6 +407,26 @@ class OfflineVocalCoach:
         else:
             lines.append("1. Keep your lower ribcage expanded through the vowel tail to maintain air pressure without throat tension.")
             lines.append("2. Lift your soft palate (think of starting a relaxed yawn) before ascending into higher phrases.")
+
+        # 4. Vocal Progression & Growth Trajectory
+        if progression_data:
+            take_num = progression_data.get("song_take_number", 1)
+            delta_s = progression_data.get("delta_score", 0)
+            delta_p = progression_data.get("delta_pitch_pct", 0.0)
+            has_hist = progression_data.get("has_prior_history", False)
+
+            lines.append("\n📈 **Vocal Progression & Growth Trajectory**:")
+            if has_hist:
+                s_sign = f"+{delta_s}" if delta_s > 0 else f"{delta_s}"
+                p_sign = f"+{delta_p:.1f}" if delta_p > 0 else f"{delta_p:.1f}"
+                if delta_s > 0:
+                    lines.append(f"• **Take #{take_num}**: You gained **{s_sign} points** compared to your previous attempt! Pitch accuracy shifted {p_sign}%. Your muscular memory is locking in.")
+                elif delta_s == 0:
+                    lines.append(f"• **Take #{take_num}**: Maintained a steady performance matching your previous score. Focus on diaphragmatic breath release to push into the next tier.")
+                else:
+                    lines.append(f"• **Take #{take_num}**: Score shifted {s_sign} points. Take a quick sip of water and reset your ribcage posture before the next run.")
+            else:
+                lines.append(f"• **Baseline Set (Take #1)**: This run sets your benchmark for this track at **{score}/100** ({pitch:.0f}% pitch accuracy). Subsequent takes will track your precision gains!")
 
         if shift != rec_shift:
             lines.append(

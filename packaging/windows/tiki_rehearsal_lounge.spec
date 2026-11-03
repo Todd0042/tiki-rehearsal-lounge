@@ -19,6 +19,7 @@ hiddenimports = [
     'ai.offline_coach',
     'db',
     'db.bridge',
+    'db.progression_db',
     'ui',
     'ui.studio_window',
     'config',
