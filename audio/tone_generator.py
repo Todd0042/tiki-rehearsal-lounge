@@ -301,9 +301,22 @@ class ToneSynthesizer:
 
         return target_path
 
-    def play_note(self, note_name: str, instrument: str = "piano"):
+    def _stop_tone_proc(self):
+        """Silences any running single-tone audio process without halting pattern sequences."""
+        if self._active_play_proc and self._active_play_proc.poll() is None:
+            try:
+                self._active_play_proc.terminate()
+            except Exception:
+                pass
+        self._active_play_proc = None
+
+    def play_note(self, note_name: str, instrument: str = "piano", stop_pattern: bool = True):
         """Plays a single note asynchronously with instant response."""
-        self.stop_playback()
+        if stop_pattern:
+            self.stop_playback()
+        else:
+            self._stop_tone_proc()
+
         wav_path = self.get_or_render_tone_file(note_name, instrument)
 
         cmd = [self._player_bin, str(wav_path)]
@@ -335,18 +348,19 @@ class ToneSynthesizer:
 
         def _worker():
             step_interval = 60.0 / bpm
-            for idx, note in enumerate(notes):
-                if self._pattern_stop_event.is_set():
-                    break
-                if on_step_cb:
-                    on_step_cb(idx, note)
-                self.play_note(note, instrument)
-                # Sleep interval
-                t0 = threading.Event()
-                t0.wait(step_interval)
-
-            if on_finished_cb and not self._pattern_stop_event.is_set():
-                on_finished_cb()
+            try:
+                for idx, note in enumerate(notes):
+                    if self._pattern_stop_event.is_set():
+                        break
+                    if on_step_cb:
+                        on_step_cb(idx, note)
+                    self.play_note(note, instrument, stop_pattern=False)
+                    # Sleep interval or wake up immediately if canceled
+                    if self._pattern_stop_event.wait(step_interval):
+                        break
+            finally:
+                if on_finished_cb:
+                    on_finished_cb()
 
         self._pattern_thread = threading.Thread(target=_worker, daemon=True)
         self._pattern_thread.start()
@@ -354,12 +368,7 @@ class ToneSynthesizer:
     def stop_playback(self):
         """Immediately silences any active tone or pattern."""
         self._pattern_stop_event.set()
-        if self._active_play_proc and self._active_play_proc.poll() is None:
-            try:
-                self._active_play_proc.terminate()
-            except Exception:
-                pass
-            self._active_play_proc = None
+        self._stop_tone_proc()
 
 
 # Global instance

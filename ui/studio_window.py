@@ -16,8 +16,9 @@ import os
 import sys
 import time
 import threading
+import queue
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
 try:
     import tkinter as tk
@@ -132,8 +133,28 @@ class StudioCockpitWindow:
         self._build_main_notebook()
         self._build_footer()
 
+        # Thread-safe UI dispatch queue (Python 3.14 safe)
+        self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self.root.after(20, self._poll_ui_queue)
+
         # Handle clean close
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def dispatch_to_main(self, fn: Callable[[], None]):
+        """Thread-safe dispatcher for executing UI updates on the Tkinter main thread."""
+        self._ui_queue.put(fn)
+
+    def _poll_ui_queue(self):
+        try:
+            while not self._ui_queue.empty():
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception as e:
+                    print(f"[UI Queue] Callback error: {e}", file=sys.stderr)
+        finally:
+            if hasattr(self, "root") and self.root and self.root.winfo_exists():
+                self.root.after(20, self._poll_ui_queue)
 
     def run(self):
         """Starts UI main event loop."""
@@ -2755,6 +2776,7 @@ class StudioCockpitWindow:
         # Rebuild chip container
         for child in self.warmup_chips_container.winfo_children():
             child.destroy()
+        self._warmup_chip_widgets = []
 
         if parsed_notes:
             for idx, note in enumerate(parsed_notes):
@@ -2770,9 +2792,10 @@ class StudioCockpitWindow:
                     relief="solid",
                     padx=6,
                     pady=2,
-                    command=lambda n=note: tone_synth.play_note(n, self._selected_instrument)
+                    command=lambda n=note: (self._reset_warmup_chips(), tone_synth.play_note(n, self._selected_instrument))
                 )
                 btn_note.pack(side="left", padx=2)
+                self._warmup_chip_widgets.append(btn_note)
 
                 if idx < len(parsed_notes) - 1:
                     tk.Label(
@@ -2808,12 +2831,19 @@ class StudioCockpitWindow:
         if hasattr(self, "calib_canvas"):
             self.calib_canvas.configure(scrollregion=self.calib_canvas.bbox("all"))
 
+    def _reset_warmup_chips(self):
+        """Resets all target note chips to standard neon cyan appearance."""
+        for chip in self._warmup_chip_widgets:
+            if chip and chip.winfo_exists():
+                chip.config(bg="#1f0e33", fg=COLOR_CYAN)
+
     def _on_play_warmup_pattern(self):
-        """Plays the full musical interval sequence at steady tempo."""
+        """Plays the full musical interval sequence at steady tempo with live chip lighting."""
         if self._is_playing_pattern:
             tone_synth.stop_playback()
             self._is_playing_pattern = False
             self.btn_play_pattern.config(text="▶ Play Sequence", bg="#2a143f", fg=COLOR_CYAN)
+            self._reset_warmup_chips()
             return
 
         if not self._active_target_notes:
@@ -2822,17 +2852,30 @@ class StudioCockpitWindow:
         self._is_playing_pattern = True
         self.btn_play_pattern.config(text="⏹️ Stop Sequence", bg=COLOR_GOLD, fg="#000000")
 
+        def _on_step(idx: int, note: str):
+            def _ui():
+                # Highlight active playing note chip in neon gold
+                for c_idx, chip in enumerate(self._warmup_chip_widgets):
+                    if chip and chip.winfo_exists():
+                        if c_idx == idx:
+                            chip.config(bg="#ffd166", fg="#000000")
+                        else:
+                            chip.config(bg="#1f0e33", fg=COLOR_CYAN)
+            self.dispatch_to_main(_ui)
+
         def _on_finished():
             def _ui():
                 self._is_playing_pattern = False
                 if hasattr(self, "btn_play_pattern") and self.btn_play_pattern.winfo_exists():
                     self.btn_play_pattern.config(text="▶ Play Sequence", bg="#2a143f", fg=COLOR_CYAN)
-            self.root.after_idle(_ui)
+                self._reset_warmup_chips()
+            self.dispatch_to_main(_ui)
 
         tone_synth.play_pattern(
             notes=self._active_target_notes,
             instrument=self._selected_instrument,
             bpm=95.0,
+            on_step_cb=_on_step,
             on_finished_cb=_on_finished
         )
 
@@ -2896,7 +2939,7 @@ class StudioCockpitWindow:
         def _worker():
             take_path = TEMP_TAKES_DIR / "calib_warmup_take.wav"
             res = evaluate_warmup_take(take_path, self._active_target_notes)
-            self.root.after_idle(lambda: self._display_warmup_evaluation(res))
+            self.dispatch_to_main(lambda: self._display_warmup_evaluation(res))
 
         threading.Thread(target=_worker, daemon=True).start()
 
