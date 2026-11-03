@@ -54,6 +54,13 @@ from audio.calibration import (
 )
 from audio.player import RehearsalPlayer
 from audio.vocal_analyzer import VocalTakeAnalyzer, TakeAnalysisReport
+from audio.tone_generator import (
+    tone_synth,
+    parse_target_notes,
+    get_sorted_instruments,
+    evaluate_warmup_take,
+    INSTRUMENT_DEFS
+)
 from downloader import TrackDownloader
 from ai.offline_coach import OfflineVocalCoach, AVAILABLE_MODELS
 
@@ -95,13 +102,19 @@ class StudioCockpitWindow:
         self._library_filter: str = "all"
         self._filter_buttons: Dict[str, tk.Button] = {}
 
-        # AI Vocal Warmup Studio State
+        # AI Vocal Warmup Studio & Reference Tone State
         self._warmup_routine: List[Dict[str, Any]] = []
         self._warmup_step_idx: int = 0
         self._warmup_timer_seconds: int = 35
         self._warmup_timer_running: bool = False
         self._warmup_timer_job: Optional[str] = None
         self._is_generating_warmup: bool = False
+        self._selected_instrument: str = "piano"
+        self._instrument_menu_map: Dict[str, str] = {}
+        self._is_recording_warmup: bool = False
+        self._active_target_notes: List[str] = []
+        self._is_playing_pattern: bool = False
+        self._warmup_chip_widgets: List[tk.Widget] = []
 
         # Session State
         self.selected_track: Optional[Dict[str, Any]] = None
@@ -1099,6 +1112,8 @@ class StudioCockpitWindow:
                 self.lbl_warmup_purpose.config(wraplength=wrap)
             if hasattr(self, "lbl_warmup_mechanics") and self.lbl_warmup_mechanics.winfo_exists():
                 self.lbl_warmup_mechanics.config(wraplength=wrap)
+            if hasattr(self, "lbl_eval_diagnosis") and self.lbl_eval_diagnosis.winfo_exists():
+                self.lbl_eval_diagnosis.config(wraplength=wrap)
 
         container.bind("<Configure>", _on_calib_content_configure)
         self.calib_canvas.bind("<Configure>", _on_calib_canvas_configure)
@@ -1396,14 +1411,58 @@ class StudioCockpitWindow:
         )
         self.lbl_warmup_title.pack(anchor="w", pady=(2, 6))
 
-        self.lbl_warmup_target_notes = tk.Label(
-            player_card,
-            text="🎶 Target Notes: C3 ➔ E3 ➔ C3",
-            font=("Helvetica", 10, "bold"),
+        # Interactive Target Notes & Pattern Player Bar
+        self.warmup_notes_frame = tk.Frame(player_card, bg="#10071a")
+        self.warmup_notes_frame.pack(fill="x", pady=(2, 6))
+
+        tk.Label(
+            self.warmup_notes_frame,
+            text="🎶 Target Notes:",
+            font=("Helvetica", 9, "bold"),
             fg=COLOR_GOLD,
             bg="#10071a"
+        ).pack(side="left", padx=(0, 6))
+
+        # Dynamic Chips Container
+        self.warmup_chips_container = tk.Frame(self.warmup_notes_frame, bg="#10071a")
+        self.warmup_chips_container.pack(side="left")
+
+        # Sequence Play Button
+        self.btn_play_pattern = tk.Button(
+            self.warmup_notes_frame,
+            text="▶ Play Sequence",
+            font=("Helvetica", 8, "bold"),
+            bg="#2a143f",
+            fg=COLOR_CYAN,
+            activebackground="#3f1c5e",
+            activeforeground="#ffffff",
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=2,
+            command=self._on_play_warmup_pattern
         )
-        self.lbl_warmup_target_notes.pack(anchor="w", pady=(0, 6))
+        self.btn_play_pattern.pack(side="left", padx=(10, 8))
+
+        # Instrument Selector Dropdown
+        tk.Label(
+            self.warmup_notes_frame,
+            text="Timbre:",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_TEXT_MUTED,
+            bg="#10071a"
+        ).pack(side="left", padx=(4, 4))
+
+        self.instrument_var = tk.StringVar(value="🎹 Acoustic Grand Piano")
+        self.cbo_instrument = ttk.Combobox(
+            self.warmup_notes_frame,
+            textvariable=self.instrument_var,
+            state="readonly",
+            font=("Helvetica", 8),
+            width=28
+        )
+        self.cbo_instrument.pack(side="left", padx=2)
+        self.cbo_instrument.bind("<<ComboboxSelected>>", self._on_instrument_selected)
 
         self.lbl_warmup_song_context = tk.Label(
             player_card,
@@ -1436,7 +1495,7 @@ class StudioCockpitWindow:
             wraplength=640,
             justify="left"
         )
-        self.lbl_warmup_mechanics.pack(anchor="w", pady=(0, 12))
+        self.lbl_warmup_mechanics.pack(anchor="w", pady=(0, 10))
 
         # Controls & Countdown Timer Row
         timer_row = tk.Frame(player_card, bg="#10071a")
@@ -1450,7 +1509,7 @@ class StudioCockpitWindow:
             fg=COLOR_CYAN,
             bg="#10071a"
         )
-        self.lbl_warmup_timer.pack(side="left", padx=(0, 16))
+        self.lbl_warmup_timer.pack(side="left", padx=(0, 14))
 
         self.btn_warmup_timer_toggle = tk.Button(
             timer_row,
@@ -1460,11 +1519,27 @@ class StudioCockpitWindow:
             fg="#000000",
             activebackground="#5cf8e2",
             bd=0,
-            padx=14,
+            padx=12,
             pady=5,
             command=self._toggle_warmup_timer
         )
-        self.btn_warmup_timer_toggle.pack(side="left", padx=4)
+        self.btn_warmup_timer_toggle.pack(side="left", padx=3)
+
+        # Record & Check Warmup Take Button
+        self.btn_warmup_record = tk.Button(
+            timer_row,
+            text="🎙️ Record & Check Take",
+            font=("Helvetica", 9, "bold"),
+            bg="#ff2a85",
+            fg="#ffffff",
+            activebackground="#ff5c9f",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=13,
+            pady=5,
+            command=self._on_toggle_warmup_recording
+        )
+        self.btn_warmup_record.pack(side="left", padx=5)
 
         self.btn_warmup_timer_reset = tk.Button(
             timer_row,
@@ -1479,7 +1554,7 @@ class StudioCockpitWindow:
             pady=4,
             command=self._reset_warmup_timer
         )
-        self.btn_warmup_timer_reset.pack(side="left", padx=4)
+        self.btn_warmup_timer_reset.pack(side="left", padx=3)
 
         self.btn_warmup_next = tk.Button(
             timer_row,
@@ -1510,6 +1585,72 @@ class StudioCockpitWindow:
             command=self._prev_warmup_step
         )
         self.btn_warmup_prev.pack(side="right", padx=6)
+
+        # Inline Warmup Pitch Evaluation Drawer (Hidden by default)
+        self.warmup_eval_card = tk.LabelFrame(
+            warmup_card,
+            text=" 📊 WARMUP PITCH EVALUATION & COACH TIPS ",
+            bg="#140b22",
+            fg=COLOR_CYAN,
+            font=("Helvetica", 10, "bold"),
+            bd=1,
+            relief="solid",
+            padx=14,
+            pady=12
+        )
+        # Hidden until take is recorded
+
+        eval_header = tk.Frame(self.warmup_eval_card, bg="#140b22")
+        eval_header.pack(fill="x", pady=(0, 6))
+
+        self.lbl_eval_score = tk.Label(
+            eval_header,
+            text="Target Accuracy: --",
+            font=("Helvetica", 11, "bold"),
+            fg=COLOR_LIME,
+            bg="#140b22"
+        )
+        self.lbl_eval_score.pack(side="left")
+
+        self.lbl_eval_range = tk.Label(
+            eval_header,
+            text="Voiced Span: --  •  Pitch Steadiness: --",
+            font=("Helvetica", 9),
+            fg=COLOR_CYAN,
+            bg="#140b22"
+        )
+        self.lbl_eval_range.pack(side="right")
+
+        self.eval_chips_frame = tk.Frame(self.warmup_eval_card, bg="#140b22")
+        self.eval_chips_frame.pack(fill="x", pady=(4, 6))
+
+        self.lbl_eval_diagnosis = tk.Label(
+            self.warmup_eval_card,
+            text="",
+            font=("Helvetica", 9),
+            fg="#e0d6f5",
+            bg="#140b22",
+            wraplength=640,
+            justify="left"
+        )
+        self.lbl_eval_diagnosis.pack(anchor="w", pady=(2, 6))
+
+        eval_actions = tk.Frame(self.warmup_eval_card, bg="#140b22")
+        eval_actions.pack(fill="x")
+
+        btn_dismiss = tk.Button(
+            eval_actions,
+            text="✕ Hide Analysis Drawer",
+            font=("Helvetica", 8, "bold"),
+            bg="#201032",
+            fg=COLOR_TEXT_MUTED,
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=2,
+            command=self._dismiss_warmup_evaluation
+        )
+        btn_dismiss.pack(side="right")
 
         # Initialize Warmup Routine & Badges
         self.root.after_idle(self._init_warmup_studio)
@@ -2375,6 +2516,24 @@ class StudioCockpitWindow:
         shift_str = f"{self.current_key_shift:+d}" if self.current_key_shift != 0 else "0"
         self.lbl_warmup_key_badge.config(text=f"🎹 Key: {shift_str} st", fg=COLOR_LIME)
 
+        # Update instrument options sorted by vocal profile
+        if hasattr(self, "cbo_instrument") and self.cbo_instrument.winfo_exists():
+            v_type = p.vocal_type if p else "Contemporary Vocalist"
+            inst_items = get_sorted_instruments(v_type)
+            disp_vals = [i["display"] for i in inst_items]
+            self._instrument_menu_map = {i["display"]: i["key"] for i in inst_items}
+            self.cbo_instrument["values"] = disp_vals
+            curr = self.instrument_var.get()
+            if curr not in self._instrument_menu_map:
+                self.instrument_var.set(disp_vals[0])
+                self._selected_instrument = inst_items[0]["key"]
+            else:
+                self._selected_instrument = self._instrument_menu_map[curr]
+
+    def _on_instrument_selected(self, event=None):
+        chosen = self.instrument_var.get()
+        self._selected_instrument = self._instrument_menu_map.get(chosen, "piano")
+
     def _load_warmup_preset(self, preset_key: str):
         p = self.vocal_profile or self.calibrator.load_profile()
         vocal_type = p.vocal_type if p else "Calibrated Vocalist"
@@ -2569,18 +2728,75 @@ class StudioCockpitWindow:
         if not self._warmup_routine or not (0 <= step_idx < len(self._warmup_routine)):
             return
 
+        # Stop any active note or pattern audio playback
+        tone_synth.stop_playback()
+        if self._is_playing_pattern:
+            self._is_playing_pattern = False
+            self.btn_play_pattern.config(text="▶ Play Sequence", bg="#2a143f", fg=COLOR_CYAN)
+
+        # Hide previous take evaluation drawer when changing steps
+        self._dismiss_warmup_evaluation()
+
         self._warmup_step_idx = step_idx
         step = self._warmup_routine[step_idx]
 
         self.lbl_warmup_step_num.config(text=f"EXERCISE {step_idx + 1} OF {len(self._warmup_routine)}")
         self.lbl_warmup_category.config(text=str(step.get("category", "VOCAL CONDITIONING")).upper())
         self.lbl_warmup_title.config(text=str(step.get("title", f"Exercise {step_idx + 1}")))
-        self.lbl_warmup_target_notes.config(text=f"🎶 Target Notes: {step.get('target_notes', 'Comfort Sweet Spot')}")
         self.lbl_warmup_song_context.config(text=f"🎵 Song Connection: {step.get('song_context', '')}")
         self.lbl_warmup_purpose.config(text=f"🎯 Purpose: {step.get('purpose', '')}")
         self.lbl_warmup_mechanics.config(text=f"🛠️ Mechanics: {step.get('mechanics', '')}")
 
-        # Button states
+        # Parse target notes into interactive clickable audio chips
+        raw_notes = step.get("target_notes", "")
+        parsed_notes = parse_target_notes(raw_notes)
+        self._active_target_notes = parsed_notes
+
+        # Rebuild chip container
+        for child in self.warmup_chips_container.winfo_children():
+            child.destroy()
+
+        if parsed_notes:
+            for idx, note in enumerate(parsed_notes):
+                btn_note = tk.Button(
+                    self.warmup_chips_container,
+                    text=f"🔊 {note}",
+                    font=("Helvetica", 8, "bold"),
+                    bg="#1f0e33",
+                    fg=COLOR_CYAN,
+                    activebackground="#3d1b64",
+                    activeforeground="#ffffff",
+                    bd=1,
+                    relief="solid",
+                    padx=6,
+                    pady=2,
+                    command=lambda n=note: tone_synth.play_note(n, self._selected_instrument)
+                )
+                btn_note.pack(side="left", padx=2)
+
+                if idx < len(parsed_notes) - 1:
+                    tk.Label(
+                        self.warmup_chips_container,
+                        text="➔",
+                        font=("Helvetica", 8),
+                        fg=COLOR_TEXT_MUTED,
+                        bg="#10071a"
+                    ).pack(side="left", padx=1)
+
+            self.btn_play_pattern.config(state="normal")
+        else:
+            # Fallback label for non-note descriptive steps
+            fallback_lbl = tk.Label(
+                self.warmup_chips_container,
+                text=raw_notes or "Comfort Sweet Spot",
+                font=("Helvetica", 9, "bold"),
+                fg=COLOR_GOLD,
+                bg="#10071a"
+            )
+            fallback_lbl.pack(side="left")
+            self.btn_play_pattern.config(state="disabled")
+
+        # Stepper navigation button states
         self.btn_warmup_prev.config(state="normal" if step_idx > 0 else "disabled")
         self.btn_warmup_next.config(state="normal" if step_idx < len(self._warmup_routine) - 1 else "disabled")
 
@@ -2588,6 +2804,164 @@ class StudioCockpitWindow:
         self._reset_warmup_timer()
 
         # Update canvas scrollregion
+        self.root.update_idletasks()
+        if hasattr(self, "calib_canvas"):
+            self.calib_canvas.configure(scrollregion=self.calib_canvas.bbox("all"))
+
+    def _on_play_warmup_pattern(self):
+        """Plays the full musical interval sequence at steady tempo."""
+        if self._is_playing_pattern:
+            tone_synth.stop_playback()
+            self._is_playing_pattern = False
+            self.btn_play_pattern.config(text="▶ Play Sequence", bg="#2a143f", fg=COLOR_CYAN)
+            return
+
+        if not self._active_target_notes:
+            return
+
+        self._is_playing_pattern = True
+        self.btn_play_pattern.config(text="⏹️ Stop Sequence", bg=COLOR_GOLD, fg="#000000")
+
+        def _on_finished():
+            def _ui():
+                self._is_playing_pattern = False
+                if hasattr(self, "btn_play_pattern") and self.btn_play_pattern.winfo_exists():
+                    self.btn_play_pattern.config(text="▶ Play Sequence", bg="#2a143f", fg=COLOR_CYAN)
+            self.root.after_idle(_ui)
+
+        tone_synth.play_pattern(
+            notes=self._active_target_notes,
+            instrument=self._selected_instrument,
+            bpm=95.0,
+            on_finished_cb=_on_finished
+        )
+
+    def _on_toggle_warmup_recording(self):
+        """Starts or stops warmup take recording with automated evaluation."""
+        if self._is_recording_warmup:
+            self._finish_warmup_recording()
+        else:
+            self._start_warmup_recording()
+
+    def _start_warmup_recording(self):
+        # Stop any active reference tones
+        tone_synth.stop_playback()
+        if self._is_playing_pattern:
+            self._is_playing_pattern = False
+            self.btn_play_pattern.config(text="▶ Play Sequence", bg="#2a143f", fg=COLOR_CYAN)
+
+        self._dismiss_warmup_evaluation()
+        self._is_recording_warmup = True
+
+        self.btn_warmup_record.config(text="⏹️ Stop Early & Analyze", bg=COLOR_GOLD, fg="#000000")
+        self.btn_warmup_timer_toggle.config(state="disabled")
+
+        # Start microphone recording to temporary take file
+        take_path = TEMP_TAKES_DIR / "calib_warmup_take.wav"
+        self.recorder.start_recording(take_path)
+
+        # Synchronize countdown timer
+        dur = 35
+        if self._warmup_routine and 0 <= self._warmup_step_idx < len(self._warmup_routine):
+            dur = int(self._warmup_routine[self._warmup_step_idx].get("duration_s", 35))
+
+        self._warmup_timer_seconds = dur
+        self._warmup_timer_running = True
+        self.lbl_warmup_status.config(
+            text="🎙️ Recording warmup take... sing with the target notes!",
+            fg=COLOR_GOLD
+        )
+        self._warmup_timer_tick()
+
+    def _finish_warmup_recording(self):
+        if not self._is_recording_warmup:
+            return
+
+        self._is_recording_warmup = False
+        self._warmup_timer_running = False
+
+        if self._warmup_timer_job:
+            self.root.after_cancel(self._warmup_timer_job)
+            self._warmup_timer_job = None
+
+        self.recorder.stop_recording()
+
+        self.btn_warmup_record.config(text="🎙️ Record & Check Take", bg="#ff2a85", fg="#ffffff")
+        self.btn_warmup_timer_toggle.config(state="normal", text="▶ Start Timer")
+        self.lbl_warmup_status.config(
+            text="✨ Maestro Tiki is evaluating your warmup take pitch alignment...",
+            fg=COLOR_CYAN
+        )
+
+        def _worker():
+            take_path = TEMP_TAKES_DIR / "calib_warmup_take.wav"
+            res = evaluate_warmup_take(take_path, self._active_target_notes)
+            self.root.after_idle(lambda: self._display_warmup_evaluation(res))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _display_warmup_evaluation(self, eval_res: Dict[str, Any]):
+        if not eval_res.get("success"):
+            err_msg = eval_res.get("error", "Evaluation failed.")
+            self.lbl_warmup_status.config(text=f"⚠️ {err_msg}", fg=COLOR_GOLD)
+            return
+
+        hit = eval_res.get("notes_hit_count", 0)
+        tot = eval_res.get("total_targets", 0)
+        pct = int(eval_res.get("hit_ratio", 0) * 100)
+        score_color = COLOR_LIME if pct >= 75 else (COLOR_GOLD if pct >= 50 else COLOR_DANGER)
+
+        self.lbl_eval_score.config(
+            text=f"Target Pitch Accuracy: {hit} / {tot} Notes Hit ({pct}%)",
+            fg=score_color
+        )
+        self.lbl_eval_range.config(
+            text=f"Voiced Span: {eval_res.get('min_note', '--')} ➔ {eval_res.get('max_note', '--')}  •  Pitch Steadiness: {eval_res.get('steadiness_pct', 0):.0f}%"
+        )
+
+        # Clear and populate result chips
+        for child in self.eval_chips_frame.winfo_children():
+            child.destroy()
+
+        for item in eval_res.get("evaluations", []):
+            note = item["note"]
+            is_h = item["hit"]
+            c_err = item["cents_err"]
+            held = item["duration_held"]
+
+            icon = "✅" if is_h else "⚠️"
+            sign = f"{c_err:+0.0f}¢"
+            chip_txt = f"{icon} {note} ({sign}, held {held:.1f}s)" if is_h else f"{icon} {note} ({sign})"
+            c_bg = "#1b3326" if is_h else "#3a1c18"
+            c_fg = COLOR_LIME if is_h else COLOR_GOLD
+
+            lbl_chip = tk.Label(
+                self.eval_chips_frame,
+                text=chip_txt,
+                font=("Helvetica", 8, "bold"),
+                bg=c_bg,
+                fg=c_fg,
+                bd=1,
+                relief="solid",
+                padx=8,
+                pady=3
+            )
+            lbl_chip.pack(side="left", padx=3)
+
+        self.lbl_eval_diagnosis.config(text=eval_res.get("coach_diagnosis", ""))
+        self.warmup_eval_card.pack(fill="x", pady=(10, 4))
+        self.lbl_warmup_status.config(
+            text="✅ Warmup evaluation ready! Check feedback below.",
+            fg=COLOR_LIME
+        )
+
+        self.root.update_idletasks()
+        if hasattr(self, "calib_canvas"):
+            self.calib_canvas.configure(scrollregion=self.calib_canvas.bbox("all"))
+
+    def _dismiss_warmup_evaluation(self):
+        if hasattr(self, "warmup_eval_card") and self.warmup_eval_card.winfo_exists():
+            self.warmup_eval_card.pack_forget()
         self.root.update_idletasks()
         if hasattr(self, "calib_canvas"):
             self.calib_canvas.configure(scrollregion=self.calib_canvas.bbox("all"))
@@ -2636,12 +3010,17 @@ class StudioCockpitWindow:
         else:
             self._warmup_timer_running = False
             self.lbl_warmup_timer.config(text="00:00", fg=COLOR_LIME)
-            self.btn_warmup_timer_toggle.config(
-                text="✓ Step Complete!",
-                state="disabled",
-                bg="#1b3d2b",
-                fg=COLOR_LIME
-            )
+
+            if self._is_recording_warmup:
+                # Automatic recording stop on timer completion
+                self._finish_warmup_recording()
+            else:
+                self.btn_warmup_timer_toggle.config(
+                    text="✓ Step Complete!",
+                    state="disabled",
+                    bg="#1b3d2b",
+                    fg=COLOR_LIME
+                )
 
     def _prev_warmup_step(self):
         if self._warmup_step_idx > 0:
@@ -2652,9 +3031,12 @@ class StudioCockpitWindow:
             self._display_warmup_step(self._warmup_step_idx + 1)
 
     def _on_close(self):
+        tone_synth.stop_playback()
         if hasattr(self, "_warmup_timer_job") and self._warmup_timer_job:
             self.root.after_cancel(self._warmup_timer_job)
             self._warmup_timer_job = None
+        if hasattr(self, "_is_recording_warmup") and self._is_recording_warmup:
+            self.recorder.stop_recording()
         self.player.stop()
         self.recorder.stop_recording()
         self.root.destroy()
