@@ -66,7 +66,7 @@ INSTRUMENT_DEFS = {
         "icon": "🎹",
         "harmonics": [1.0, 0.65, 0.40, 0.22, 0.12, 0.06, 0.03, 0.015],
         "attack_s": 0.012,
-        "decay_rate": 2.2,
+        "decay_rate": 1.5,
         "vibrato_hz": 0.0,
         "vibrato_depth": 0.0
     },
@@ -75,7 +75,7 @@ INSTRUMENT_DEFS = {
         "icon": "⚡",
         "harmonics": [1.0, 0.38, 0.14, 0.05, 0.015],
         "attack_s": 0.020,
-        "decay_rate": 1.6,
+        "decay_rate": 1.2,
         "vibrato_hz": 4.8,
         "vibrato_depth": 0.0025
     },
@@ -84,7 +84,7 @@ INSTRUMENT_DEFS = {
         "icon": "🎻",
         "harmonics": [1.0, 0.85, 0.65, 0.45, 0.30, 0.20, 0.12, 0.08],
         "attack_s": 0.080,
-        "decay_rate": 0.5,
+        "decay_rate": 0.45,
         "vibrato_hz": 5.2,
         "vibrato_depth": 0.005
     },
@@ -93,7 +93,7 @@ INSTRUMENT_DEFS = {
         "icon": "🪈",
         "harmonics": [1.0, 0.08, 0.16, 0.03, 0.01],
         "attack_s": 0.045,
-        "decay_rate": 0.4,
+        "decay_rate": 0.35,
         "vibrato_hz": 5.5,
         "vibrato_depth": 0.006
     },
@@ -102,7 +102,7 @@ INSTRUMENT_DEFS = {
         "icon": "🎸",
         "harmonics": [1.0, 0.72, 0.48, 0.28, 0.16, 0.09, 0.04],
         "attack_s": 0.015,
-        "decay_rate": 2.5,
+        "decay_rate": 1.8,
         "vibrato_hz": 0.0,
         "vibrato_depth": 0.0
     },
@@ -111,7 +111,7 @@ INSTRUMENT_DEFS = {
         "icon": "🎷",
         "harmonics": [0.75, 1.0, 0.90, 0.65, 0.40, 0.25, 0.15, 0.08],
         "attack_s": 0.040,
-        "decay_rate": 0.7,
+        "decay_rate": 0.6,
         "vibrato_hz": 4.5,
         "vibrato_depth": 0.004
     }
@@ -137,6 +137,34 @@ def note_name_to_hz(name: str) -> Optional[float]:
     if m is None:
         return None
     return midi_to_hz(m)
+
+
+def transpose_note(note_name: str, semitones: int) -> str:
+    """Transposes a musical note name by an integer semitone shift."""
+    m = note_name_to_midi(note_name)
+    if m is None:
+        return note_name
+    return midi_to_note_name(m + semitones)
+
+
+def clamp_note_to_range(
+    note_name: str,
+    min_note: Optional[str] = None,
+    max_note: Optional[str] = None
+) -> str:
+    """Clamps a note to remain within singer's physiological [min_note, max_note]."""
+    m = note_name_to_midi(note_name)
+    if m is None:
+        return note_name
+    if min_note:
+        min_m = note_name_to_midi(min_note)
+        if min_m is not None:
+            m = max(m, min_m)
+    if max_note:
+        max_m = note_name_to_midi(max_note)
+        if max_m is not None:
+            m = min(m, max_m)
+    return midi_to_note_name(m)
 
 
 def parse_target_notes(text: str) -> List[str]:
@@ -220,7 +248,7 @@ class ToneSynthesizer:
     def synthesize_wave(
         self,
         freq_hz: float,
-        duration_s: float = 1.8,
+        duration_s: float = 2.5,
         instrument: str = "piano",
         sample_rate: int = 44100
     ) -> np.ndarray:
@@ -292,7 +320,7 @@ class ToneSynthesizer:
         if not freq_hz:
             freq_hz = 261.63  # Middle C fallback
 
-        audio_pcm = self.synthesize_wave(freq_hz, duration_s=1.8, instrument=instrument)
+        audio_pcm = self.synthesize_wave(freq_hz, duration_s=2.5, instrument=instrument)
         with wave.open(str(target_path), "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
@@ -338,11 +366,11 @@ class ToneSynthesizer:
         self,
         notes: List[str],
         instrument: str = "piano",
-        bpm: float = 95.0,
+        bpm: float = 47.5,
         on_step_cb: Optional[Callable[[int, str], None]] = None,
         on_finished_cb: Optional[Callable[[], None]] = None
     ):
-        """Plays a sequence of notes at steady tempo asynchronously."""
+        """Plays a sequence of notes at steady tempo asynchronously (bpm 47.5 = 1.26s per note)."""
         self.stop_playback()
         self._pattern_stop_event.clear()
 

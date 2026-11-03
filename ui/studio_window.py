@@ -60,7 +60,10 @@ from audio.tone_generator import (
     parse_target_notes,
     get_sorted_instruments,
     evaluate_warmup_take,
-    INSTRUMENT_DEFS
+    INSTRUMENT_DEFS,
+    transpose_note,
+    clamp_note_to_range,
+    note_name_to_midi
 )
 from downloader import TrackDownloader
 from ai.offline_coach import OfflineVocalCoach, AVAILABLE_MODELS
@@ -119,6 +122,8 @@ class StudioCockpitWindow:
 
         # Session State
         self.selected_track: Optional[Dict[str, Any]] = None
+        self._song_peaks: Optional[Dict[str, Any]] = None
+        self._recommended_key_shift: int = 0
         self.current_key_shift: int = 0
         self.current_take_wav: Optional[Path] = None
         self.is_rehearsing: bool = False
@@ -1819,23 +1824,96 @@ class StudioCockpitWindow:
     def _update_key_display(self):
         shift = self.current_key_shift
         sign = f"+{shift}" if shift > 0 else (str(shift) if shift < 0 else "0 (Original)")
-        self.lbl_key_val.config(text=f"Key Shift: {sign}")
+        sug_tag = f" (Suggested: {self._recommended_key_shift:+d})" if getattr(self, "_recommended_key_shift", 0) != 0 and self._recommended_key_shift != shift else ""
+        self.lbl_key_val.config(text=f"Key Shift: {sign}{sug_tag}")
         if self.player.is_playing:
             self.player.set_key_shift(shift)
         self._refresh_warmup_context()
+        self._sync_warmup_to_current_key()
+
+    def _get_or_extract_song_peaks(self) -> Dict[str, Any]:
+        """Gets cached song melody peaks or scans the track audio file."""
+        if getattr(self, "_song_peaks", None):
+            return self._song_peaks
+        if self.selected_track:
+            local_path = self.selected_track.get("local_path") or self.selected_track.get("file_path")
+            if local_path and Path(local_path).exists():
+                peaks = self.analyzer.extract_song_melody_profile(Path(local_path))
+                self._song_peaks = peaks
+                return peaks
+        # Pedagogical baseline based on singer calibration
+        p = self.vocal_profile or self.calibrator.load_profile()
+        if p and p.tessitura_max_note:
+            m = note_name_to_midi(p.tessitura_max_note)
+            if m:
+                # Song climax defaults to ~3 semitones above singer's tessitura (e.g. D4 for B3 baritone)
+                song_m = m + 3
+                peaks = {"max_midi": song_m, "max_note": midi_to_note_name(song_m), "min_note": "C3"}
+                return peaks
+        return {"max_hz": 349.23, "max_note": "F4", "min_note": "C3"}
+
+    def _calculate_active_climax_note(self) -> Tuple[str, str]:
+        """
+        Calculates (original_climax_note, shifted_climax_note) factoring in
+        singer calibration, track melody peak, and current key shift.
+        Strictly clamped so it never exceeds singer's safe physiological ceiling.
+        """
+        p = self.vocal_profile or self.calibrator.load_profile()
+        peaks = self._get_or_extract_song_peaks()
+        orig_note, shifted_note, shifted_midi = self.analyzer.get_song_climax_note(peaks, self.current_key_shift)
+
+        # Safety clamp: if singer has calibrated tessitura ceiling, clamp shifted climax
+        if p:
+            ceiling_note = p.tessitura_max_note or p.range_max_note
+            if ceiling_note:
+                shifted_note = clamp_note_to_range(shifted_note, max_note=ceiling_note)
+
+        return orig_note, shifted_note
+
+    def _sync_warmup_to_current_key(self):
+        """
+        Dynamically updates the active warmup routine's target notes and UI chips
+        to reflect the active key shift and song climax.
+        """
+        if not getattr(self, "_warmup_routine", None):
+            return
+
+        p = self.vocal_profile or self.calibrator.load_profile()
+        anchor = p.anchor_note if (p and p.anchor_note) else "E3"
+        orig_climax, shifted_climax = self._calculate_active_climax_note()
+
+        # Update Exercise 3 (or any Climax step)
+        for step in self._warmup_routine:
+            cat = str(step.get("category", "")).lower()
+            title = str(step.get("title", "")).lower()
+            if "climax" in cat or "climax" in title or "high belt" in cat or "range extension" in cat:
+                shift_tag = f" (Key {self.current_key_shift:+d})" if self.current_key_shift != 0 else ""
+                step["target_notes"] = f"{anchor} ➔ {shifted_climax}{shift_tag}"
+                if self.selected_track:
+                    song_name = self.selected_track.get("title", "Song")
+                    step["song_context"] = f"Conquers the climax notes of '{song_name}' (Peak {orig_climax} transposed to {shifted_climax} at Key {self.current_key_shift:+d})."
+
+        # If currently viewing Exercise 3, refresh the chips immediately!
+        if hasattr(self, "_warmup_step_idx") and 0 <= self._warmup_step_idx < len(self._warmup_routine):
+            curr_step = self._warmup_routine[self._warmup_step_idx]
+            cat = str(curr_step.get("category", "")).lower()
+            title = str(curr_step.get("title", "")).lower()
+            if "climax" in cat or "climax" in title or "high belt" in cat:
+                self._display_warmup_step(self._warmup_step_idx)
 
     def _on_auto_match_key(self):
         if not self.selected_track:
             messagebox.showinfo("Select Track", "Please select a rehearsal track first.")
             return
-        if not self.vocal_profile:
-            messagebox.showinfo("Calibrate First", "Please complete vocal calibration in the 'Vocal Calibration' tab to enable smart key matching.")
+        p = self.vocal_profile or self.calibrator.load_profile()
+        if not p:
+            messagebox.showinfo("Calibrate First", "Please complete vocal calibration in the 'Vocal Calibration & Warmup' tab to enable smart key matching.")
             return
 
-        # Recommend key based on track
-        rec_shift, reason = self.analyzer.recommend_key_for_track({
-            "max_hz": 330.0  # fallback or extracted
-        })
+        self.analyzer.update_profile(p)
+        peaks = self._get_or_extract_song_peaks()
+        rec_shift, reason = self.analyzer.recommend_key_for_track(peaks)
+        self._recommended_key_shift = rec_shift
         self.current_key_shift = rec_shift
         self._update_key_display()
         messagebox.showinfo("Smart Key Recommendation", f"Recommended Key: {rec_shift:+d}\n\n{reason}")
@@ -2288,6 +2366,8 @@ class StudioCockpitWindow:
             return
 
         self.selected_track = track
+        self._song_peaks = None
+        self._recommended_key_shift = 0
         self.lbl_track_title.config(text=track.get("title", "Unknown Title"))
         self.lbl_track_artist.config(text=track.get("artist", "Unknown Artist"))
         dur_min = track.get("duration", 0) // 60
@@ -2300,6 +2380,24 @@ class StudioCockpitWindow:
 
         # Update warmup context immediately
         self._refresh_warmup_context()
+        self._sync_warmup_to_current_key()
+
+        # In background, scan track audio and recommend key shift
+        local_path = track.get("local_path") or track.get("file_path")
+        if local_path and Path(local_path).exists():
+            def _scan_worker():
+                peaks = self.analyzer.extract_song_melody_profile(Path(local_path))
+                self._song_peaks = peaks
+                p = self.vocal_profile or self.calibrator.load_profile()
+                if p:
+                    self.analyzer.update_profile(p)
+                    rec_shift, reason = self.analyzer.recommend_key_for_track(peaks)
+                    self._recommended_key_shift = rec_shift
+                    def _ui():
+                        self._update_key_display()
+                        self._sync_warmup_to_current_key()
+                    self.dispatch_to_main(_ui)
+            threading.Thread(target=_scan_worker, daemon=True).start()
 
     def _on_search_youtube(self):
         query = self.ent_search.get().strip()
@@ -2563,6 +2661,9 @@ class StudioCockpitWindow:
         anchor = p.anchor_note if (p and p.anchor_note) else "E3"
         song_title = self.selected_track.get("title", "Your Song") if self.selected_track else "Your Song"
 
+        orig_climax, shifted_climax = self._calculate_active_climax_note()
+        shift_tag = f" (Key {self.current_key_shift:+d})" if self.current_key_shift != 0 else ""
+
         if preset_key == "climax":
             routine = [
                 {
@@ -2589,11 +2690,11 @@ class StudioCockpitWindow:
                     "step_num": 3,
                     "title": "Song Climax Target Sirens ('Ooo ➔ Aaa')",
                     "category": "High Belt & Range Extension",
-                    "target_notes": f"{anchor} ➔ {sweet_max} (Climax + Key {self.current_key_shift:+d})",
+                    "target_notes": f"{anchor} ➔ {shifted_climax}{shift_tag}",
                     "duration_s": 45,
                     "purpose": "Rehearses smooth vocal register navigation up to the peak notes demanded by the track.",
                     "mechanics": "Glide smoothly upward on a tall 'Ooo', morphing cleanly into 'Aaa' as you touch your ceiling note. Drop the jaw and lean into diaphragm support.",
-                    "song_context": f"Targets cords specifically to conquer the high climax notes of '{song_title}'."
+                    "song_context": f"Targets cords specifically to conquer the high climax notes of '{song_title}' (Song peak: {orig_climax} transposed to {shifted_climax}{shift_tag})."
                 },
                 {
                     "step_num": 4,
@@ -2696,7 +2797,8 @@ class StudioCockpitWindow:
             routine = self.offline_coach._generate_rule_based_warmup(
                 p.to_dict() if p else None,
                 self.selected_track,
-                self.current_key_shift
+                self.current_key_shift,
+                climax_note=shifted_climax
             )
 
         self._warmup_routine = routine
@@ -2717,10 +2819,12 @@ class StudioCockpitWindow:
 
         def _worker():
             p_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
+            orig_climax, shifted_climax = self._calculate_active_climax_note()
             routine = self.offline_coach.generate_warmup_routine(
                 profile_data=p_dict,
                 track_info=self.selected_track,
-                key_shift=self.current_key_shift
+                key_shift=self.current_key_shift,
+                climax_note=shifted_climax
             )
 
             def _done():
@@ -2874,7 +2978,7 @@ class StudioCockpitWindow:
         tone_synth.play_pattern(
             notes=self._active_target_notes,
             instrument=self._selected_instrument,
-            bpm=95.0,
+            bpm=47.5,
             on_step_cb=_on_step,
             on_finished_cb=_on_finished
         )

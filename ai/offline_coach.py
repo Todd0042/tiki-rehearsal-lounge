@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 
 from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME
+from audio.tone_generator import transpose_note, clamp_note_to_range, parse_target_notes
 
 MODELS_DIR = Path.home() / ".config" / "TikiRehearsalLounge" / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -368,17 +369,19 @@ class OfflineVocalCoach:
         self,
         profile_data: Optional[Dict[str, Any]] = None,
         track_info: Optional[Dict[str, Any]] = None,
-        key_shift: int = 0
+        key_shift: int = 0,
+        climax_note: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Generates an adaptive, multi-step vocal warmup routine tailored to:
         - Singer's calibrated tessitura (vocal type, power sweet spot)
         - Target song melody peaks and recommended key shift
         """
+        ceiling = (profile_data.get("tessitura_max_note") or "G4") if profile_data else "G4"
         if not self.load_engine():
-            return self._generate_rule_based_warmup(profile_data, track_info, key_shift)
+            return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
 
-        prompt = self._build_warmup_prompt(profile_data, track_info, key_shift)
+        prompt = self._build_warmup_prompt(profile_data, track_info, key_shift, climax_note)
 
         try:
             output = self._llm(
@@ -389,19 +392,20 @@ class OfflineVocalCoach:
                 stop=["<|im_end|>", "<|endoftext|>"]
             )
             text = output["choices"][0]["text"].strip()
-            parsed = self._parse_warmup_json(text)
+            parsed = self._parse_warmup_json(text, max_ceiling=ceiling)
             if parsed and len(parsed) >= 2:
                 return parsed
-            return self._generate_rule_based_warmup(profile_data, track_info, key_shift)
+            return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
         except Exception as e:
             print(f"[OfflineVocalCoach] Warmup generation error: {e}", file=sys.stderr)
-            return self._generate_rule_based_warmup(profile_data, track_info, key_shift)
+            return self._generate_rule_based_warmup(profile_data, track_info, key_shift, climax_note)
 
     def _build_warmup_prompt(
         self,
         profile: Optional[Dict[str, Any]],
         track_info: Optional[Dict[str, Any]],
-        key_shift: int
+        key_shift: int,
+        climax_note: Optional[str] = None
     ) -> str:
         song_title = track_info.get("title", "Selected Rehearsal Song") if track_info else "Selected Rehearsal Song"
         artist = track_info.get("artist", "") if track_info else ""
@@ -409,6 +413,7 @@ class OfflineVocalCoach:
         sweet_min = profile.get("tessitura_min_note", "C3") if profile else "C3"
         sweet_max = profile.get("tessitura_max_note", "G4") if profile else "G4"
         anchor = profile.get("anchor_note", "F3") if profile else "F3"
+        eff_climax = climax_note or (transpose_note(sweet_max, key_shift) if key_shift != 0 else sweet_max)
 
         prompt = (
             f"<|im_start|>system\n"
@@ -418,13 +423,14 @@ class OfflineVocalCoach:
             f"No markdown formatting, no commentary, only the raw JSON array.<|im_end|>\n"
             f"<|im_start|>user\n"
             f"Singer Profile: {vocal_type}, Speaking Anchor: {anchor}, Comfort Sweet Spot: {sweet_min} to {sweet_max}.\n"
-            f"Upcoming Song: '{song_title}' {f'by {artist}' if artist else ''} at key shift {key_shift:+d} semitones.\n"
+            f"Upcoming Song: '{song_title}' {f'by {artist}' if artist else ''} at key shift {key_shift:+d} semitones. Target Climax Note: {eff_climax}.\n"
+            f"IMPORTANT: Exercise 3 target_notes must glide smoothly to the song climax ({eff_climax}) and NEVER exceed {sweet_max}.\n"
             f"Create 4 progressive warmups that unlock diaphragmatic breath, Singer's Formant ring (2.8–3.4 kHz), and extend upper range safely up to the song climax.<|im_end|>\n"
             f"<|im_start|>assistant\n["
         )
         return prompt
 
-    def _parse_warmup_json(self, text: str) -> Optional[List[Dict[str, Any]]]:
+    def _parse_warmup_json(self, text: str, max_ceiling: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
         try:
             cleaned = text.strip()
             if not cleaned.startswith("["):
@@ -452,6 +458,13 @@ class OfflineVocalCoach:
                     elif not tn:
                         item["target_notes"] = "Comfortable Tessitura"
 
+                    # If max_ceiling specified, clamp target notes to safe singer ceiling
+                    if max_ceiling and isinstance(item.get("target_notes"), str):
+                        parsed = parse_target_notes(item["target_notes"])
+                        if parsed:
+                            clamped_notes = [clamp_note_to_range(n, max_note=max_ceiling) for n in parsed]
+                            item["target_notes"] = " ➔ ".join(clamped_notes)
+
                     if not item.get("song_context"):
                         item["song_context"] = "Targeted cord and breath conditioning for your upcoming rehearsal."
                 return data
@@ -463,7 +476,8 @@ class OfflineVocalCoach:
     def _generate_rule_based_warmup(
         profile: Optional[Dict[str, Any]],
         track_info: Optional[Dict[str, Any]],
-        key_shift: int
+        key_shift: int,
+        climax_note: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Pedagogical fallback generator incorporating singer range, track, and key shift."""
         song_title = track_info.get("title", "Your Rehearsal Song") if track_info else "Your Rehearsal Song"
@@ -471,6 +485,19 @@ class OfflineVocalCoach:
         sweet_min = profile.get("tessitura_min_note", "C3") if profile else "C3"
         sweet_max = profile.get("tessitura_max_note", "G4") if profile else "G4"
         anchor = profile.get("anchor_note", "E3") if profile else "E3"
+
+        # Determine target climax note factoring in key shift and physiological ceiling
+        target_climax = climax_note
+        if not target_climax:
+            if key_shift != 0:
+                target_climax = transpose_note(sweet_max, key_shift)
+            else:
+                target_climax = sweet_max
+
+        # Strict safety clamp
+        target_climax = clamp_note_to_range(target_climax, min_note=sweet_min, max_note=sweet_max)
+
+        shift_tag = f" (Key {key_shift:+d})" if key_shift != 0 else ""
 
         return [
             {
@@ -497,11 +524,11 @@ class OfflineVocalCoach:
                 "step_num": 3,
                 "title": "Upper Tessitura Climax Sirens ('Ooo ➔ Aaa')",
                 "category": "Range Extension & High Belts",
-                "target_notes": f"{sweet_min} ➔ {sweet_max} (Climax Prep)",
+                "target_notes": f"{anchor} ➔ {target_climax}{shift_tag}",
                 "duration_s": 45,
                 "purpose": "Smooths vocal register transitions and prepares cords for the track's highest belted climax.",
                 "mechanics": "Start in rich chest voice on 'Ooo' and siren upward smoothly toward your power ceiling, opening the vowel to 'Aaa' as you ascend. Anchor support from your lower abdomen.",
-                "song_context": f"Prepares your cords to hit the highest melody notes of '{song_title}' (Key shift: {key_shift:+d})."
+                "song_context": f"Prepares your cords to hit the highest melody notes of '{song_title}'{shift_tag}."
             },
             {
                 "step_num": 4,

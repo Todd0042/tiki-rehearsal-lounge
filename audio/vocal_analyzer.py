@@ -11,6 +11,8 @@ Compares recorded vocal takes against reference vocal stems or musical pitch gri
 
 from __future__ import annotations
 import math
+import shutil
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List, Tuple
@@ -26,6 +28,31 @@ from audio.calibration import (
     cents_deviation,
     VocalProfile
 )
+
+
+def load_audio_mono(audio_path: Path, sr: int = 22050, max_seconds: Optional[float] = 90.0) -> Tuple[np.ndarray, int]:
+    """Loads mono audio from WAV directly or any audio format via ffmpeg."""
+    p = Path(audio_path)
+    if not p.exists():
+        return np.zeros(0, dtype=np.float32), sr
+    if p.suffix.lower() == ".wav":
+        try:
+            return read_wav_mono(p)
+        except Exception:
+            pass
+    if shutil.which("ffmpeg"):
+        cmd = ["ffmpeg", "-loglevel", "quiet", "-i", str(p)]
+        if max_seconds:
+            cmd.extend(["-t", str(max_seconds)])
+        cmd.extend(["-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"])
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+            if res.stdout:
+                data = np.frombuffer(res.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+                return data, sr
+        except Exception:
+            pass
+    return np.zeros(0, dtype=np.float32), sr
 
 
 @dataclass
@@ -99,6 +126,7 @@ class TakeAnalysisReport:
 class VocalTakeAnalyzer:
     def __init__(self, vocal_profile: Optional[VocalProfile] = None):
         self.profile = vocal_profile
+        self._melody_cache: Dict[str, Dict[str, Any]] = {}
 
     def update_profile(self, profile: Optional[VocalProfile]):
         self.profile = profile
@@ -117,7 +145,7 @@ class VocalTakeAnalyzer:
 
         song_max_hz = track_melody_peaks.get("max_hz", 0.0)
         if song_max_hz <= 0:
-            song_max_midi = track_melody_peaks.get("max_midi", 69.0)
+            song_max_midi = track_melody_peaks.get("max_midi", 65.0)  # F4 default
             song_max_hz = midi_to_hz(song_max_midi)
         else:
             song_max_midi = hz_to_midi(song_max_hz)
@@ -156,32 +184,76 @@ class VocalTakeAnalyzer:
     def extract_song_melody_profile(self, audio_path: Path) -> Dict[str, Any]:
         """
         Extracts vocal melodic ceiling and floor from a guide vocal or sing-along track.
+        Supports WAV, MP3, and all media formats via load_audio_mono, caching results.
         """
-        audio, sr = read_wav_mono(audio_path)
+        p_str = str(audio_path)
+        if p_str in self._melody_cache:
+            return self._melody_cache[p_str]
+
+        audio, sr = load_audio_mono(Path(audio_path))
+        if len(audio) < sr * 2:
+            # Fallback to standard mid-range pop vocal (C3 to F4)
+            fallback = {
+                "min_hz": 130.81,
+                "max_hz": 349.23,
+                "min_note": "C3",
+                "max_note": "F4",
+                "median_hz": 220.0
+            }
+            return fallback
+
         times, pitches = extract_pitch_contour(audio, sr, min_hz=65.0, max_hz=880.0, voicing_threshold=0.40)
         voiced = pitches[pitches > 0]
 
         if len(voiced) < 50:
-            # Fallback to standard mid-range pop vocal (C3 to C5)
-            return {
+            fallback = {
                 "min_hz": 130.81,
-                "max_hz": 523.25,
+                "max_hz": 349.23,
                 "min_note": "C3",
-                "max_note": "C5",
-                "median_hz": 261.63
+                "max_note": "F4",
+                "median_hz": 220.0
             }
+            return fallback
 
         min_hz = float(np.percentile(voiced, 5))
         max_hz = float(np.percentile(voiced, 95))
         median_hz = float(np.median(voiced))
 
-        return {
+        res = {
             "min_hz": min_hz,
             "max_hz": max_hz,
             "min_note": midi_to_note_name(hz_to_midi(min_hz)),
             "max_note": midi_to_note_name(hz_to_midi(max_hz)),
             "median_hz": median_hz
         }
+        self._melody_cache[p_str] = res
+        return res
+
+    def get_song_climax_note(
+        self,
+        audio_path_or_dict: Any,
+        key_shift: int = 0
+    ) -> Tuple[str, str, int]:
+        """
+        Returns (original_climax_note, shifted_climax_note, shifted_climax_midi).
+        """
+        if isinstance(audio_path_or_dict, dict):
+            peaks = audio_path_or_dict
+        elif isinstance(audio_path_or_dict, (str, Path)) and Path(audio_path_or_dict).exists():
+            peaks = self.extract_song_melody_profile(Path(audio_path_or_dict))
+        else:
+            peaks = {"max_hz": 349.23, "max_note": "F4"}
+
+        song_max_hz = peaks.get("max_hz", 0.0)
+        if song_max_hz <= 0:
+            song_max_midi = peaks.get("max_midi", 65.0)  # F4 default
+        else:
+            song_max_midi = hz_to_midi(song_max_hz)
+
+        orig_note = midi_to_note_name(song_max_midi)
+        shifted_midi = int(round(song_max_midi + key_shift))
+        shifted_note = midi_to_note_name(shifted_midi)
+        return orig_note, shifted_note, shifted_midi
 
     def analyze_take(
         self,
