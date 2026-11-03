@@ -22,7 +22,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 try:
     import tkinter as tk
-    from tkinter import ttk, messagebox
+    from tkinter import ttk, messagebox, filedialog
     HAS_TKINTER = True
 except Exception:
     HAS_TKINTER = False
@@ -45,7 +45,12 @@ from config import (
     TEMP_TAKES_DIR,
     TIKI_RECORDINGS_DIR,
     TIKI_VIDEO_QUALITY_PROFILE,
-    TIKI_TARGET_LUFS
+    TIKI_TARGET_LUFS,
+    save_studio_config,
+    load_studio_config,
+    STUDIO_CONFIG,
+    STORAGE_MODE,
+    find_tiki_karaoke_config_path
 )
 from db.bridge import TikiDatabaseBridge
 from audio.recorder import AudioRecorder
@@ -285,12 +290,31 @@ class StudioCockpitWindow:
         )
         ver_lbl.pack(side="left", padx=(8, 0), pady=(6, 0))
 
+        # Settings Button
+        self.btn_settings = tk.Button(
+            title_row,
+            text="⚙️ Settings",
+            font=("Helvetica", 9, "bold"),
+            bg="#231238",
+            fg=COLOR_CYAN,
+            activebackground="#3b1b59",
+            activeforeground="#ffffff",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._open_settings_dialog
+        )
+        self.btn_settings.pack(side="right", padx=(10, 0), pady=(2, 0))
+
         # Database Status Badge
+        mode_text = "● Tiki Synced" if getattr(self, "_storage_mode", STORAGE_MODE) == "integrated" else "● Standalone"
         self.db_status_lbl = tk.Label(
             title_row,
-            text="● Database Synced",
-            font=("Helvetica", 10, "bold"),
-            fg=COLOR_LIME,
+            text=mode_text,
+            font=("Helvetica", 9, "bold"),
+            fg=COLOR_LIME if hasattr(self, "db") and self.db.is_connected() else COLOR_GOLD,
             bg=COLOR_BG_MAIN
         )
         self.db_status_lbl.pack(side="right", pady=(4, 0))
@@ -3847,6 +3871,261 @@ class StudioCockpitWindow:
     def _next_warmup_step(self):
         if self._warmup_step_idx < len(self._warmup_routine) - 1:
             self._display_warmup_step(self._warmup_step_idx + 1)
+
+    def _open_settings_dialog(self):
+        """Opens the Tiki-themed Studio Settings & Storage Configuration modal dialog."""
+        cfg = load_studio_config()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("⚙️ Studio Settings & Storage Configuration")
+        dlg.geometry("580x560")
+        dlg.configure(bg=COLOR_BG_MAIN)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Center over main window
+        dlg.update_idletasks()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        dlg.geometry(f"+{rx + max(0, (rw - 580) // 2)}+{ry + max(0, (rh - 560) // 2)}")
+
+        # Header Frame
+        hdr = tk.Frame(dlg, bg="#1a1025", padx=18, pady=14)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr,
+            text="⚙️ STUDIO STORAGE & SYSTEM PREFERENCES",
+            font=("Helvetica", 11, "bold"),
+            fg=COLOR_GOLD,
+            bg="#1a1025"
+        ).pack(anchor="w")
+        tk.Label(
+            hdr,
+            text="Configure standalone vs integrated storage, audio targets, and library paths.",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg="#1a1025"
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Main Form Container
+        form = tk.Frame(dlg, bg=COLOR_BG_MAIN, padx=20, pady=12)
+        form.pack(fill="both", expand=True)
+
+        # 1. Storage Mode Card
+        mode_card = tk.LabelFrame(
+            form,
+            text=" 📦 STORAGE ARCHITECTURE ",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_CYAN,
+            bg="#150a22",
+            padx=12,
+            pady=8
+        )
+        mode_card.pack(fill="x", pady=(0, 10))
+
+        mode_var = tk.StringVar(value=cfg.get("storage_mode", "integrated"))
+
+        rb_int = tk.Radiobutton(
+            mode_card,
+            text="🔗 Integrated with Tiki Karaoke (Share karaoke.db catalog & media folders)",
+            variable=mode_var,
+            value="integrated",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MAIN,
+            bg="#150a22",
+            selectcolor="#0d0814",
+            activebackground="#150a22",
+            activeforeground=COLOR_CYAN
+        )
+        rb_int.pack(anchor="w", pady=2)
+
+        rb_std = tk.Radiobutton(
+            mode_card,
+            text="🏝️ Standalone Rehearsal Lounge (Custom independent library & database)",
+            variable=mode_var,
+            value="standalone",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MAIN,
+            bg="#150a22",
+            selectcolor="#0d0814",
+            activebackground="#150a22",
+            activeforeground=COLOR_CYAN
+        )
+        rb_std.pack(anchor="w", pady=2)
+
+        # 2. Directory Paths Card
+        paths_card = tk.LabelFrame(
+            form,
+            text=" 📁 DIRECTORY PATHS ",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_GOLD,
+            bg="#150a22",
+            padx=12,
+            pady=8
+        )
+        paths_card.pack(fill="x", pady=(0, 10))
+
+        def _make_folder_row(parent, label_text, default_val):
+            f = tk.Frame(parent, bg="#150a22")
+            f.pack(fill="x", pady=4)
+            tk.Label(f, text=label_text, font=("Helvetica", 8, "bold"), fg=COLOR_TEXT_MUTED, bg="#150a22").pack(anchor="w")
+            sub_f = tk.Frame(f, bg="#150a22")
+            sub_f.pack(fill="x", pady=(2, 0))
+            ent = tk.Entry(sub_f, font=("Helvetica", 9), bg="#0d0814", fg=COLOR_TEXT_MAIN, insertbackground=COLOR_CYAN, bd=1, relief="solid")
+            ent.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ent.insert(0, str(default_val))
+            def _browse():
+                chosen = filedialog.askdirectory(title=f"Select {label_text}", initialdir=ent.get() or str(Path.home()))
+                if chosen:
+                    ent.delete(0, tk.END)
+                    ent.insert(0, chosen)
+            btn = tk.Button(sub_f, text="Browse...", font=("Helvetica", 8, "bold"), bg="#25123d", fg=COLOR_CYAN, padx=8, pady=2, command=_browse)
+            btn.pack(side="right")
+            return ent
+
+        ent_lib = _make_folder_row(paths_card, "Song Library Directory (tracks & sing_along):", cfg.get("library_dir", ""))
+        ent_data = _make_folder_row(paths_card, "Database Directory (karaoke.db location):", cfg.get("data_dir", ""))
+        ent_rec = _make_folder_row(paths_card, "Performance Takes / Recordings Directory:", cfg.get("recordings_dir", ""))
+
+        # 3. Audio & Video Standards Card
+        media_card = tk.LabelFrame(
+            form,
+            text=" 🎛️ AUDIO & VIDEO TARGETS ",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_LIME,
+            bg="#150a22",
+            padx=12,
+            pady=8
+        )
+        media_card.pack(fill="x", pady=(0, 10))
+
+        # Quality Row
+        q_row = tk.Frame(media_card, bg="#150a22")
+        q_row.pack(fill="x", pady=2)
+        tk.Label(q_row, text="Video Quality Profile:", font=("Helvetica", 8, "bold"), fg=COLOR_TEXT_MUTED, bg="#150a22").pack(side="left", padx=(0, 10))
+        cbo_q = ttk.Combobox(
+            q_row,
+            values=["pro (1080p Full HD AVC1)", "balanced_720p (720p HD)", "compact_480p (480p SD)"],
+            state="readonly",
+            width=28
+        )
+        cur_q = str(cfg.get("video_quality_profile", "pro")).lower()
+        if "720" in cur_q:
+            cbo_q.current(1)
+        elif "480" in cur_q or "compact" in cur_q:
+            cbo_q.current(2)
+        else:
+            cbo_q.current(0)
+        cbo_q.pack(side="left")
+
+        # LUFS Row
+        lufs_row = tk.Frame(media_card, bg="#150a22")
+        lufs_row.pack(fill="x", pady=4)
+        tk.Label(lufs_row, text="Target Loudness (LUFS):", font=("Helvetica", 8, "bold"), fg=COLOR_TEXT_MUTED, bg="#150a22").pack(side="left", padx=(0, 10))
+        cbo_lufs = ttk.Combobox(
+            lufs_row,
+            values=["-23.0 LUFS (EBU R128 Professional Default)", "-16.0 LUFS (Standard Web Streaming)"],
+            state="readonly",
+            width=28
+        )
+        cur_lufs = float(cfg.get("target_lufs", -16.0))
+        cbo_lufs.current(0 if cur_lufs <= -20.0 else 1)
+        cbo_lufs.pack(side="left")
+
+        # Status / Feedback label
+        lbl_msg = tk.Label(form, text="", font=("Helvetica", 8, "bold"), fg=COLOR_DANGER, bg=COLOR_BG_MAIN)
+        lbl_msg.pack(anchor="w")
+
+        # Bottom Buttons Bar
+        btn_bar = tk.Frame(dlg, bg="#1a1025", padx=18, pady=12)
+        btn_bar.pack(fill="x")
+
+        def _on_save_settings():
+            new_lib = ent_lib.get().strip()
+            new_data = ent_data.get().strip()
+            new_rec = ent_rec.get().strip()
+
+            if not new_lib or not new_data:
+                lbl_msg.config(text="Please specify valid Library and Database directories.", fg=COLOR_DANGER)
+                return
+
+            # Ensure paths exist
+            try:
+                Path(new_lib).mkdir(parents=True, exist_ok=True)
+                Path(new_data).mkdir(parents=True, exist_ok=True)
+                if new_rec:
+                    Path(new_rec).mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                lbl_msg.config(text=f"Failed to create directories: {e}", fg=COLOR_DANGER)
+                return
+
+            q_sel = cbo_q.get().lower()
+            new_q = "balanced_720p" if "720" in q_sel else ("compact_480p" if "480" in q_sel else "pro")
+            new_lufs = -23.0 if "-23" in cbo_lufs.get() else -16.0
+
+            updated_cfg = {
+                "storage_mode": mode_var.get(),
+                "library_dir": new_lib,
+                "data_dir": new_data,
+                "recordings_dir": new_rec or str(Path(new_lib) / "recordings"),
+                "target_lufs": new_lufs,
+                "video_quality_profile": new_q
+            }
+
+            ok = save_studio_config(updated_cfg)
+            if not ok:
+                lbl_msg.config(text="Failed to write configuration file.", fg=COLOR_DANGER)
+                return
+
+            # Update live instances
+            self._storage_mode = updated_cfg["storage_mode"]
+            new_db_path = Path(new_data) / "karaoke.db"
+            self.db = TikiDatabaseBridge(db_path=new_db_path)
+            self.downloader = TrackDownloader(db_bridge=self.db)
+
+            # Update Header Indicator
+            mode_text = "● Tiki Synced" if self._storage_mode == "integrated" else "● Standalone"
+            self.db_status_lbl.config(
+                text=mode_text,
+                fg=COLOR_LIME if self.db.is_connected() else COLOR_GOLD
+            )
+
+            # Refresh library view
+            self._on_search_library()
+
+            self.lbl_status.config(
+                text=f"✅ Settings applied! Using {self._storage_mode.title()} mode with database at {new_db_path.name}.",
+                fg=COLOR_LIME
+            )
+            dlg.destroy()
+
+        btn_cancel = tk.Button(
+            btn_bar,
+            text="Cancel",
+            bg="#2a1545",
+            fg=COLOR_TEXT_MUTED,
+            font=("Helvetica", 9),
+            bd=0,
+            padx=14,
+            pady=6,
+            command=dlg.destroy
+        )
+        btn_cancel.pack(side="right", padx=(8, 0))
+
+        btn_save = tk.Button(
+            btn_bar,
+            text="💾 Save & Apply Settings",
+            bg=COLOR_CYAN,
+            fg="#000000",
+            font=("Helvetica", 9, "bold"),
+            bd=0,
+            padx=16,
+            pady=6,
+            command=_on_save_settings
+        )
+        btn_save.pack(side="right")
 
     def _on_close(self):
         tone_synth.stop_playback()

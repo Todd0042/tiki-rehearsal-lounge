@@ -14,20 +14,109 @@ from typing import List, Dict, Any, Optional
 from config import TIKI_DB_PATH, TIKI_TARGET_LUFS
 
 
+def ensure_database_schema(conn: sqlite3.Connection):
+    """
+    Ensures that the required SQLite schema exists for Tiki Rehearsal Lounge,
+    matching 100% of Tiki Karaoke's schema, FTS5 virtual tables, indices, and triggers.
+    Allows running 100% standalone without an existing Tiki Karaoke installation.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT UNIQUE NOT NULL,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            original_title TEXT NOT NULL,
+            channel TEXT DEFAULT '',
+            duration INTEGER DEFAULT 0,
+            is_downloaded INTEGER DEFAULT 0,
+            local_path TEXT DEFAULT '',
+            normalized_lufs REAL DEFAULT -16.0,
+            download_status TEXT DEFAULT 'idle',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            play_count INTEGER DEFAULT 0,
+            last_played TIMESTAMP,
+            is_sing_along INTEGER DEFAULT 0,
+            genre TEXT DEFAULT '',
+            release_year INTEGER DEFAULT 0,
+            media_source TEXT DEFAULT 'youtube',
+            media_type TEXT DEFAULT 'video',
+            cdg_path TEXT DEFAULT '',
+            is_starter_pack INTEGER DEFAULT 0,
+            starter_pack_name TEXT DEFAULT ''
+        );
+    """)
+
+    # Create FTS5 virtual table if it doesn't exist
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+            title,
+            artist,
+            original_title,
+            channel,
+            content='tracks',
+            content_rowid='id'
+        );
+    """)
+
+    # FTS5 Triggers
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS tracks_ai AFTER INSERT ON tracks BEGIN
+            INSERT INTO tracks_fts(rowid, title, artist, original_title, channel)
+            VALUES (new.id, new.title, new.artist, new.original_title, new.channel);
+        END;
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS tracks_ad AFTER DELETE ON tracks BEGIN
+            INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, original_title, channel)
+            VALUES('delete', old.id, old.title, old.artist, old.original_title, old.channel);
+        END;
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS tracks_au AFTER UPDATE ON tracks BEGIN
+            INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, original_title, channel)
+            VALUES('delete', old.id, old.title, old.artist, old.original_title, old.channel);
+            INSERT INTO tracks_fts(rowid, title, artist, original_title, channel)
+            VALUES (new.id, new.title, new.artist, new.original_title, new.channel);
+        END;
+    """)
+
+    # Fast query indices
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_library ON tracks(is_downloaded, play_count, last_played);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_sing_along ON tracks(is_sing_along, is_downloaded);")
+    conn.commit()
+
+
 class TikiDatabaseBridge:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or TIKI_DB_PATH
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Opens a robust SQLite connection with WAL support and busy timeout."""
+        """Opens a robust SQLite connection with WAL support, auto-creating schema if running standalone."""
         if not self.db_path.exists():
-            raise FileNotFoundError(f"Tiki Karaoke database not found at: {self.db_path}")
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.db_path), timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            ensure_database_schema(conn)
+            return conn
 
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
+
+        # Quick check if tracks table exists
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tracks';")
+        if not cur.fetchone():
+            ensure_database_schema(conn)
+
         return conn
 
     def is_connected(self) -> bool:

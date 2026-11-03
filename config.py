@@ -1,8 +1,10 @@
 """
 Tiki Rehearsal Lounge - Configuration & System Bridge
 =====================================================
-Locates and reads Tiki Karaoke's active configuration and database,
-and manages local studio preferences and singer vocal profiles.
+Locates and reads active configuration and database:
+- Can operate 100% standalone with dedicated paths
+- Can operate integrated with Tiki Karaoke
+- Manages local studio preferences and singer vocal profiles.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ HOME_DIR = Path.home()
 CONFIG_HOME = Path(os.getenv("XDG_CONFIG_HOME", str(HOME_DIR / ".config")))
 STUDIO_CONFIG_DIR = CONFIG_HOME / "TikiRehearsalLounge"
 STUDIO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+STUDIO_CONFIG_PATH = STUDIO_CONFIG_DIR / "config.json"
 
 VOCAL_PROFILE_PATH = STUDIO_CONFIG_DIR / "vocal_profile.json"
 TEMP_TAKES_DIR = Path("/tmp/tiki_rehearsal_takes")
@@ -53,7 +56,6 @@ def load_tiki_karaoke_config() -> Dict[str, Any]:
         except Exception as e:
             print(f"[Config] Error loading {cfg_path}: {e}", file=sys.stderr)
 
-    # Defaults matching Tiki Karaoke standard layout
     default_base = HOME_DIR / "Music" / "Karaoke" / "Tiki"
     return {
         "bar_name": "The Tiki Hut Karaoke Lounge",
@@ -65,21 +67,84 @@ def load_tiki_karaoke_config() -> Dict[str, Any]:
     }
 
 
-# Active Tiki Karaoke Paths
-TIKI_CONFIG = load_tiki_karaoke_config()
+def save_studio_config(cfg: Dict[str, Any]) -> bool:
+    """Saves configuration to STUDIO_CONFIG_PATH."""
+    try:
+        STUDIO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STUDIO_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"[Config] Error saving {STUDIO_CONFIG_PATH}: {e}", file=sys.stderr)
+        return False
 
-TIKI_DATA_DIR = Path(TIKI_CONFIG.get("data_dir", str(HOME_DIR / "Music" / "Karaoke" / "Tiki" / "db")))
-TIKI_LIBRARY_DIR = Path(TIKI_CONFIG.get("library_dir", str(HOME_DIR / "Music" / "Karaoke" / "Tiki")))
-TIKI_RECORDINGS_DIR = Path(TIKI_CONFIG.get("recordings_dir", str(TIKI_LIBRARY_DIR / "performance_recordings")))
-TIKI_TARGET_LUFS = float(TIKI_CONFIG.get("target_lufs", -16.0))
-TIKI_VIDEO_QUALITY_PROFILE = str(TIKI_CONFIG.get("video_quality_profile", "pro"))
+
+def load_studio_config() -> Dict[str, Any]:
+    """
+    Loads active config from STUDIO_CONFIG_PATH.
+    If missing, auto-detects Tiki Karaoke or creates standalone defaults.
+    """
+    if STUDIO_CONFIG_PATH.exists():
+        try:
+            with open(STUDIO_CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Config] Error reading {STUDIO_CONFIG_PATH}: {e}", file=sys.stderr)
+
+    tiki_cfg_path = find_tiki_karaoke_config_path()
+    if tiki_cfg_path:
+        tiki = load_tiki_karaoke_config()
+        lib_dir = str(tiki.get("library_dir") or (HOME_DIR / "storage" / "Karaoke"))
+        data_dir = str(tiki.get("data_dir") or (HOME_DIR / "Documents" / "tiki-karaoke" / "data"))
+        rec_dir = str(tiki.get("recordings_dir") or (Path(lib_dir) / "performance_recordings"))
+        cfg = {
+            "storage_mode": "integrated",
+            "library_dir": lib_dir,
+            "data_dir": data_dir,
+            "recordings_dir": rec_dir,
+            "target_lufs": float(tiki.get("target_lufs", -23.0)),
+            "video_quality_profile": str(tiki.get("video_quality_profile", "pro")),
+        }
+    else:
+        base_dir = HOME_DIR / "Music" / "TikiRehearsalLounge"
+        cfg = {
+            "storage_mode": "standalone",
+            "library_dir": str(base_dir / "library"),
+            "data_dir": str(STUDIO_CONFIG_DIR / "data"),
+            "recordings_dir": str(base_dir / "recordings"),
+            "target_lufs": -16.0,
+            "video_quality_profile": "pro",
+        }
+
+    save_studio_config(cfg)
+    return cfg
+
+
+# Active Studio Configuration
+STUDIO_CONFIG = load_studio_config()
+TIKI_CONFIG = STUDIO_CONFIG  # Backwards compatibility alias
+
+STORAGE_MODE = str(STUDIO_CONFIG.get("storage_mode", "integrated"))
+TIKI_DATA_DIR = Path(STUDIO_CONFIG.get("data_dir", str(STUDIO_CONFIG_DIR / "data")))
+TIKI_LIBRARY_DIR = Path(STUDIO_CONFIG.get("library_dir", str(HOME_DIR / "Music" / "TikiRehearsalLounge" / "library")))
+TIKI_RECORDINGS_DIR = Path(STUDIO_CONFIG.get("recordings_dir", str(TIKI_LIBRARY_DIR / "performance_recordings")))
+TIKI_TARGET_LUFS = float(STUDIO_CONFIG.get("target_lufs", -16.0))
+TIKI_VIDEO_QUALITY_PROFILE = str(STUDIO_CONFIG.get("video_quality_profile", "pro"))
 
 TIKI_DB_PATH = TIKI_DATA_DIR / "karaoke.db"
 
-# Library Subdirectories
 TRACKS_DIR = TIKI_LIBRARY_DIR / "tracks"
 SING_ALONG_DIR = TIKI_LIBRARY_DIR / "sing_along"
 FILLER_DIR = TIKI_LIBRARY_DIR / "filler"
+
+# Create directories if they do not exist
+try:
+    TIKI_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    TRACKS_DIR.mkdir(parents=True, exist_ok=True)
+    SING_ALONG_DIR.mkdir(parents=True, exist_ok=True)
+    TIKI_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
 
 # UI Aesthetic Constants (Matching Control Hub & Tiki Theme)
 COLOR_BG_MAIN = "#0d0814"        # Deep Midnight Violet
