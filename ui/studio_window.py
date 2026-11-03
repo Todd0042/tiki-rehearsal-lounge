@@ -2129,19 +2129,17 @@ class StudioCockpitWindow:
 
     def _start_rehearsal(self):
         if not self.selected_track:
-            messagebox.showinfo("Select Track", "Please select a song from the library first.")
+            messagebox.showinfo("Select Track", "Please select a song from the library first.", parent=self.root)
             return
 
         local_path = self.selected_track.get("local_path")
         if not local_path or not Path(local_path).exists():
-            messagebox.showwarning("Track Not Found", "The local media file for this track was not found. Please download it first.")
+            messagebox.showwarning(
+                "Track Not Found",
+                "The local media file for this track was not found. Please download it first.",
+                parent=self.root
+            )
             return
-
-        self.is_rehearsing = True
-        self.btn_record_take.config(text="⏹️ STOP REHEARSAL TAKE", bg=COLOR_DANGER)
-        self.lbl_status.config(text="Rehearsing take... Playback and mic recording active.")
-        self._pitch_history.clear()
-        self._draw_pitch_trace()
 
         # Prepare take file
         timestamp = int(time.time())
@@ -2151,8 +2149,27 @@ class StudioCockpitWindow:
         # Start low-latency mic capture
         self.recorder.start_recording(take_path)
 
-        # Start MPV playback
-        self.player.play(Path(local_path), key_shift=self.current_key_shift)
+        # Start player playback
+        started = self.player.play(Path(local_path), key_shift=self.current_key_shift)
+        if not started:
+            self.recorder.stop_recording()
+            self.is_rehearsing = False
+            self.btn_record_take.config(text="🎤 START REHEARSAL TAKE", bg=COLOR_MAGENTA)
+            self.lbl_status.config(text="⚠️ Could not start rehearsal playback.", fg=COLOR_DANGER)
+            messagebox.showerror(
+                "Playback Error",
+                f"Could not open media file:\n{Path(local_path).name}\n\n"
+                f"Player binary: {self.player._mpv_path or 'None found'}\n"
+                "Please verify the media file is valid.",
+                parent=self.root
+            )
+            return
+
+        self.is_rehearsing = True
+        self.btn_record_take.config(text="⏹️ STOP REHEARSAL TAKE", bg=COLOR_DANGER)
+        self.lbl_status.config(text="Rehearsing take... Playback and mic recording active.", fg=COLOR_CYAN)
+        self._pitch_history.clear()
+        self._draw_pitch_trace()
 
     def _stop_rehearsal(self):
         self.is_rehearsing = False

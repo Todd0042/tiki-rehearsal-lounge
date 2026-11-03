@@ -47,8 +47,17 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "`n[3/5] Staging Windows 64-bit helper binaries (ffmpeg, ffprobe, ffplay)..." -ForegroundColor Yellow
+Write-Host "`n[3/5] Staging Windows 64-bit helper binaries (ffmpeg, ffprobe, mpv)..." -ForegroundColor Yellow
+$env:PYTHONIOENCODING = "utf-8"
 & $PythonBin "$ScriptDir\fetch_windows_binaries.py" "$ScriptDir\bin"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`n[ERROR] Staging Windows helper binaries failed with exit code $LASTEXITCODE." -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+if (-not (Test-Path "$ScriptDir\bin\mpv.exe")) {
+    Write-Host "`n[ERROR] mpv.exe was not found in $ScriptDir\bin after staging!" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "`n[4/5] Building TikiRehearsalLounge standalone bundle via PyInstaller..." -ForegroundColor Yellow
 
@@ -72,15 +81,17 @@ if (Test-Path "$ScriptDir\dist") { Remove-Item -Path "$ScriptDir\dist" -Recurse 
 New-Item -ItemType Directory -Force -Path "$ScriptDir\dist" | Out-Null
 Copy-Item -Path "$LocalDist\TikiRehearsalLounge" -Destination "$ScriptDir\dist\" -Recurse -Force
 
-# Stage helper binaries into both bin and _internal\bin
+# Stage helper binaries into both bin and _internal\bin across both local and build dist
 if (Test-Path "$ScriptDir\bin") {
     $targetBins = @(
         "$ScriptDir\dist\TikiRehearsalLounge\bin",
-        "$ScriptDir\dist\TikiRehearsalLounge\_internal\bin"
+        "$ScriptDir\dist\TikiRehearsalLounge\_internal\bin",
+        "$LocalDist\TikiRehearsalLounge\bin",
+        "$LocalDist\TikiRehearsalLounge\_internal\bin"
     )
     foreach ($tb in $targetBins) {
         if (-not (Test-Path $tb)) { New-Item -ItemType Directory -Force -Path $tb | Out-Null }
-        Copy-Item "$ScriptDir\bin\*.exe" "$tb\" -Force -ErrorAction SilentlyContinue
+        Copy-Item "$ScriptDir\bin\*.*" "$tb\" -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -133,11 +144,12 @@ if (Test-Path $InnoComp) {
     if (Test-Path "$ScriptDir\dist_installer") { Remove-Item -Path "$ScriptDir\dist_installer" -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Force -Path "$ScriptDir\dist_installer" | Out-Null
 
-    & $InnoComp "/DMyAppVersion=$AppVersion" "$ScriptDir\installer.iss"
+    & $InnoComp "/DMyAppVersion=$AppVersion" "/DSourceDir=$ScriptDir\dist\TikiRehearsalLounge" "$ScriptDir\installer.iss"
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Created Windows Installer in dist_installer\" -ForegroundColor Green
     } else {
-        Write-Host "[WARN] Inno Setup compilation encountered exit code: $LASTEXITCODE" -ForegroundColor Yellow
+        Write-Host "`n[ERROR] Inno Setup compilation encountered exit code: $LASTEXITCODE" -ForegroundColor Red
+        exit $LASTEXITCODE
     }
 } else {
     Write-Host "`n[INFO] Inno Setup (ISCC.exe) not found on system. Portable ZIP generated." -ForegroundColor Cyan

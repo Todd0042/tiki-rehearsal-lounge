@@ -12,6 +12,13 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
+# Force UTF-8 encoding on Windows consoles
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_BIN_DIR = BASE_DIR / "bin"
 
@@ -37,7 +44,7 @@ def get_latest_mpv_url() -> str:
                 if name.startswith("mpv-x86_64-") and not name.startswith("mpv-x86_64-v3-") and name.endswith(".7z"):
                     url = asset.get("browser_download_url")
                     if url:
-                        print(f"🎯 Resolved latest mpv release asset: {name}")
+                        print(f" [MPV] Resolved latest mpv release asset: {name}")
                         return url
     except Exception as e:
         print(f"   [Notice] Could not query GitHub API for mpv: {e}")
@@ -46,7 +53,7 @@ def get_latest_mpv_url() -> str:
     return "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261103/mpv-x86_64-20261103-git-a687796d9d.7z"
 
 def download_file(url: str, dest_path: Path):
-    print(f"📥 Downloading: {url} -> {dest_path.name}")
+    print(f" [Download] {url} -> {dest_path.name}")
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     temp_dest = dest_path.with_suffix(dest_path.suffix + ".download")
 
@@ -73,7 +80,7 @@ def download_file(url: str, dest_path: Path):
     temp_dest.rename(dest_path)
 
 def extract_from_zip(zip_path: Path, target_names: list, dest_dir: Path):
-    print(f"📦 Extracting {target_names} from {zip_path.name}...")
+    print(f" [Extract] Extracting {target_names} from {zip_path.name}...")
     with zipfile.ZipFile(zip_path, 'r') as z:
         for member in z.infolist():
             member_base = Path(member.filename).name.lower()
@@ -85,7 +92,7 @@ def extract_from_zip(zip_path: Path, target_names: list, dest_dir: Path):
                         shutil.copyfileobj(source, target_f)
 
 def extract_from_7z(archive_path: Path, target_names: list, dest_dir: Path):
-    print(f"📦 Extracting {target_names} from {archive_path.name}...")
+    print(f" [Extract] Extracting {target_names} from {archive_path.name}...")
     seven_z = shutil.which("7z") or shutil.which("7za")
     if not seven_z and sys.platform == "win32":
         for p in [r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]:
@@ -104,13 +111,13 @@ def extract_from_7z(archive_path: Path, target_names: list, dest_dir: Path):
 
 def fetch_all_binaries(output_dir: Path = DEFAULT_BIN_DIR):
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"🌺 Staging Windows 64-bit Binaries into: {output_dir}\n")
+    print(f"[Staging] Staging Windows 64-bit Binaries into: {output_dir}\n")
 
     # 1. Fetch FFmpeg & FFprobe
     for key, info in BINARIES.items():
         target_file = output_dir / info["filename"]
         if target_file.exists():
-            print(f"✅ {info['filename']} already exists in {output_dir.name}/. Skipping.")
+            print(f" [OK] {info['filename']} already exists in {output_dir.name}/. Skipping.")
             continue
 
         if info["is_zip"]:
@@ -130,7 +137,7 @@ def fetch_all_binaries(output_dir: Path = DEFAULT_BIN_DIR):
     # 2. Fetch Standalone MPV
     mpv_exe = output_dir / "mpv.exe"
     if mpv_exe.exists():
-        print(f"✅ mpv.exe already exists in {output_dir.name}/. Skipping.")
+        print(f" [OK] mpv.exe already exists in {output_dir.name}/. Skipping.")
     else:
         mpv_url = get_latest_mpv_url()
         temp_7z = output_dir / "mpv_temp.7z"
@@ -141,13 +148,17 @@ def fetch_all_binaries(output_dir: Path = DEFAULT_BIN_DIR):
             if temp_7z.exists():
                 temp_7z.unlink()
 
-    print("\n🎉 Windows 64-bit binary staging complete:")
+    # Validate critical binaries
+    if not mpv_exe.exists():
+        raise RuntimeError(f"mpv.exe was not successfully extracted to {output_dir}")
+
+    print("\n[Complete] Windows 64-bit binary staging complete:")
     for f in output_dir.glob("*.exe"):
         size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"   • {f.name:<16} ({size_mb:.2f} MB)")
+        print(f"   * {f.name:<16} ({size_mb:.2f} MB)")
     for f in output_dir.glob("*.dll"):
         size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"   • {f.name:<16} ({size_mb:.2f} MB)")
+        print(f"   * {f.name:<16} ({size_mb:.2f} MB)")
 
 if __name__ == "__main__":
     out = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_BIN_DIR

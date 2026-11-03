@@ -3,7 +3,7 @@
 
 #define MyAppName "Tiki Rehearsal Lounge"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.2"
+  #define MyAppVersion "1.0.3"
 #endif
 #define MyAppPublisher "Todd"
 #define MyAppURL "https://github.com/Todd0042/tiki-rehearsal-lounge"
@@ -41,10 +41,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
-#if FileExists("C:\TikiRehearsalBuild\dist\TikiRehearsalLounge\TikiRehearsalLounge.exe")
-#define SourceDir "C:\TikiRehearsalBuild\dist\TikiRehearsalLounge"
-#else
-#define SourceDir "dist\TikiRehearsalLounge"
+#ifndef SourceDir
+  #if FileExists("dist\TikiRehearsalLounge\TikiRehearsalLounge.exe")
+    #define SourceDir "dist\TikiRehearsalLounge"
+  #elif FileExists("C:\TikiRehearsalBuild\dist\TikiRehearsalLounge\TikiRehearsalLounge.exe")
+    #define SourceDir "C:\TikiRehearsalBuild\dist\TikiRehearsalLounge"
+  #else
+    #define SourceDir "dist\TikiRehearsalLounge"
+  #endif
 #endif
 
 [Files]

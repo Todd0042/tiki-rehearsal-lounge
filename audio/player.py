@@ -33,22 +33,25 @@ class RehearsalPlayer:
         self._current_key_shift: int = 0
         self._mpv_path = self._find_player_bin()
 
-    def _find_player_bin(self) -> str:
+    def _find_player_bin(self) -> Optional[str]:
         from config import get_bundled_binary_path
         cand = get_bundled_binary_path("mpv")
-        if cand:
+        if cand and cand.exists():
             return str(cand)
         cand = shutil.which("mpv")
         if cand:
             return str(cand)
         cand = get_bundled_binary_path("ffplay")
+        if cand and cand.exists():
+            return str(cand)
+        cand = shutil.which("ffplay")
         if cand:
             return str(cand)
-        return shutil.which("ffplay") or "mpv"
+        return None
 
     @property
     def is_playing(self) -> bool:
-        return self._is_playing and (self._process is not None) and (self._process.poll() is None)
+        return self._is_playing and (self._process is None or self._process.poll() is None)
 
     @property
     def current_file(self) -> Optional[Path]:
@@ -76,6 +79,21 @@ class RehearsalPlayer:
 
         self._current_file = target
         self._current_key_shift = int(max(-3, min(3, key_shift)))
+        self._mpv_path = self._find_player_bin()
+
+        # If no standalone player binary found, attempt OS default handler on Windows
+        if not self._mpv_path:
+            if sys.platform == "win32":
+                print(f"[RehearsalPlayer] No mpv/ffplay found. Opening via Windows default player: {target}", file=sys.stderr)
+                try:
+                    os.startfile(str(target))
+                    self._is_playing = True
+                    return True
+                except Exception as e:
+                    print(f"[RehearsalPlayer] Windows startfile failed: {e}", file=sys.stderr)
+                    return False
+            print("[RehearsalPlayer] No mpv or ffplay binary found on system.", file=sys.stderr)
+            return False
 
         # Clean old socket if exists (Linux)
         if sys.platform != "win32" and self._ipc_socket_path.exists():
@@ -84,8 +102,8 @@ class RehearsalPlayer:
             except Exception:
                 pass
 
-        # Compute pitch-scale factor for librubberband
-        # 1 semitone = 2 ** (1 / 12) ≈ 1.059463
+        # Prepare audio filter arguments only if transposition is requested
+        has_pitch_shift = (self._current_key_shift != 0)
         pitch_scale = 2.0 ** (self._current_key_shift / 12.0)
         af_arg = f"rubberband=pitch-scale={pitch_scale:.6f}:pitch=consistency:formant=preserved:engine=finer"
 
@@ -94,10 +112,11 @@ class RehearsalPlayer:
             cmd = [
                 self._mpv_path,
                 str(target),
-                "-af", af_arg,
                 "-window_title", "🌴 Tiki Rehearsal Stage",
                 "-autoexit"
             ]
+            if has_pitch_shift:
+                cmd.extend(["-af", af_arg])
             if fullscreen:
                 cmd.append("-fs")
         else:
@@ -106,25 +125,40 @@ class RehearsalPlayer:
                 self._mpv_path,
                 str(target),
                 ipc_arg,
-                f"--af={af_arg}",
                 "--title=🌴 Tiki Rehearsal Stage",
                 "--keep-open=no",
                 "--force-window=yes",
                 "--geometry=70%:70%",
                 "--autofit=960x540",
             ]
+            if has_pitch_shift:
+                cmd.append(f"--af={af_arg}")
             if fullscreen:
                 cmd.append("--fs")
 
+        from config import TEMP_TAKES_DIR
+        log_path = TEMP_TAKES_DIR / "mpv_player.log"
+
         try:
+            log_f = open(log_path, "a", encoding="utf-8", errors="replace")
+            log_f.write(f"\n--- [{time.strftime('%Y-%m-%d %H:%M:%S')}] Launching: {' '.join(cmd)} ---\n")
+            log_f.flush()
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=log_f,
+                stderr=subprocess.STDOUT
             )
             self._is_playing = True
         except Exception as e:
-            print(f"[RehearsalPlayer] Failed to start mpv: {e}", file=sys.stderr)
+            print(f"[RehearsalPlayer] Failed to start {self._mpv_path}: {e}", file=sys.stderr)
+            if sys.platform == "win32":
+                print("[RehearsalPlayer] Falling back to Windows default media player...", file=sys.stderr)
+                try:
+                    os.startfile(str(target))
+                    self._is_playing = True
+                    return True
+                except Exception as os_err:
+                    print(f"[RehearsalPlayer] Native fallback also failed: {os_err}", file=sys.stderr)
             self._is_playing = False
             return False
 
