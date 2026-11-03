@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# Rehearsal temporary audio takes & caches
+temp_takes/
+*.wav
+*.mp3
+!assets/*.mp3
+
+# User profile and calibration caches
+profile_local.json
+.vocal_cache/
+
+# OS
+.DS_Store
+Thumbs.db
