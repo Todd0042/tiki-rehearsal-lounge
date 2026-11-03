@@ -434,28 +434,41 @@ class StudioCockpitWindow:
         grid_frame.columnconfigure(1, weight=1)
 
         # Coach Notes
-        notes_frame = tk.LabelFrame(
+        self.notes_frame = tk.LabelFrame(
             parent,
             text=" COACH FEEDBACK ",
             bg="#140b20",
             fg=COLOR_GOLD,
             font=("Helvetica", 9, "bold"),
             bd=1,
-            padx=12,
-            pady=10
+            padx=14,
+            pady=12
         )
-        notes_frame.pack(fill="both", expand=True, pady=(0, 12))
+        self.notes_frame.pack(fill="both", expand=True, pady=(0, 12))
 
-        self.lbl_coach_notes = tk.Label(
-            notes_frame,
+        self.coach_feedback_container = tk.Frame(self.notes_frame, bg="#140b20")
+        self.coach_feedback_container.pack(fill="both", expand=True)
+
+        self.lbl_coach_empty = tk.Label(
+            self.coach_feedback_container,
             text="Complete a rehearsal take to view detailed coaching feedback.",
             font=("Helvetica", 10),
-            fg=COLOR_TEXT_MAIN,
+            fg=COLOR_TEXT_MUTED,
             bg="#140b20",
-            wraplength=480,
+            anchor="w",
             justify="left"
         )
-        self.lbl_coach_notes.pack(anchor="w")
+        self.lbl_coach_empty.pack(fill="x", padx=4, pady=6)
+
+        def _on_resize_notes(event):
+            wrap = max(300, event.width - 40)
+            if hasattr(self, "lbl_coach_empty") and self.lbl_coach_empty.winfo_exists():
+                self.lbl_coach_empty.config(wraplength=wrap)
+            for widget in self.coach_feedback_container.winfo_children():
+                for sub in widget.winfo_children():
+                    if isinstance(sub, tk.Label) and sub.cget("text") != "✦":
+                        sub.config(wraplength=wrap)
+        self.notes_frame.bind("<Configure>", _on_resize_notes)
 
     def _create_metric_tile(self, parent: tk.Frame, title: str, val: str, sub: str) -> tk.Frame:
         tile = tk.Frame(parent, bg="#201330", bd=1, relief="solid", padx=12, pady=10)
@@ -854,10 +867,66 @@ class StudioCockpitWindow:
         self.tile_rhythm._val_lbl.config(text=f"{report.rhythm_offset_ms:+0.1f}ms")
         self.tile_vib._val_lbl.config(text=f"{report.vibrato_rate_hz:0.1f} Hz" if report.vibrato_present else "Straight")
 
-        feedback_text = "\n\n".join(report.coach_feedback)
+        # Clear previous feedback items
+        for child in self.coach_feedback_container.winfo_children():
+            child.destroy()
+
+        avail_wrap = max(280, self.notes_frame.winfo_width() - 44)
+
+        # 1. Add feedback rows
+        for note in report.coach_feedback:
+            row = tk.Frame(self.coach_feedback_container, bg="#140b20")
+            row.pack(fill="x", pady=3, anchor="w")
+
+            bullet_lbl = tk.Label(
+                row,
+                text="✦",
+                font=("Helvetica", 9, "bold"),
+                fg=COLOR_CYAN,
+                bg="#140b20"
+            )
+            bullet_lbl.pack(side="left", anchor="nw", padx=(4, 6), pady=(1, 0))
+
+            msg_lbl = tk.Label(
+                row,
+                text=note,
+                font=("Helvetica", 10),
+                fg=COLOR_TEXT_MAIN,
+                bg="#140b20",
+                anchor="w",
+                justify="left",
+                wraplength=avail_wrap
+            )
+            msg_lbl.pack(side="left", fill="x", expand=True)
+
+        # 2. Add Smart Key recommendation card if present
         if report.key_recommendation_reason:
-            feedback_text += f"\n\n💡 Smart Key: {report.key_recommendation_reason}"
-        self.lbl_coach_notes.config(text=feedback_text)
+            smart_box = tk.Frame(self.coach_feedback_container, bg="#201133", bd=1, relief="solid", padx=10, pady=8)
+            smart_box.pack(fill="x", pady=(8, 4), anchor="w")
+
+            title_row = tk.Frame(smart_box, bg="#201133")
+            title_row.pack(fill="x")
+
+            tk.Label(
+                title_row,
+                text="🎹 Smart Key Recommendation:",
+                font=("Helvetica", 9, "bold"),
+                fg=COLOR_GOLD,
+                bg="#201133"
+            ).pack(side="left")
+
+            body_lbl = tk.Label(
+                smart_box,
+                text=report.key_recommendation_reason,
+                font=("Helvetica", 9),
+                fg=COLOR_TEXT_MAIN,
+                bg="#201133",
+                anchor="w",
+                justify="left",
+                wraplength=avail_wrap - 24
+            )
+            body_lbl.pack(fill="x", pady=(4, 0))
+
         self.lbl_status.config(text="Performance analysis complete. Great work!")
 
     def _on_search_library(self):
