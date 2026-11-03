@@ -130,6 +130,72 @@ def normalize_audio_loudness(input_path: Path, output_path: Path, target_lufs: f
         return False
 
 
+def clean_search_query(query: str) -> str:
+    """Strips noisy tag words and brackets so ytsearch targets clean titles/artists."""
+    q = query
+    # Remove brackets and parentheses content like (karaoke), [sing-along], etc.
+    q = re.sub(r"(?i)[\(\[](?:karaoke|sing-along|sing\s*along|lyrics?|instrumental|official|hd|video|audio|version)[\)\]]", "", q)
+    # Remove trailing words like 'karaoke', 'sing along', 'lyrics'
+    q = re.sub(r"(?i)\b(karaoke|sing-along|sing\s*along|lyrics?|instrumental)\b", "", q)
+    # Clean whitespace and stray dashes
+    q = re.sub(r"\s+", " ", q).strip(" -")
+    return q or query.strip()
+
+
+def is_karaoke_track(title: str, uploader: str = "") -> bool:
+    """Validates whether a track is a legitimate karaoke/instrumental backing track."""
+    t_lower = title.lower()
+    u_lower = uploader.lower()
+
+    negative_patterns = [
+        r"\bofficial\s+music\s+video\b", r"\bofficial\s+video\b", r"\bmusic\s+video\b",
+        r"\bofficial\s+audio\b", r"\blive\s+at\b", r"\blive\s+in\b", r"\bconcert\b",
+        r"\breaction\b", r"\breacts\b", r"\bvocal\s+coach\b", r"\bhow\s+to\s+sing\b",
+        r"\btutorial\b", r"\bguitar\s+tab\b", r"\bbass\s+tab\b", r"\bcover\s+by\b",
+        r"\bfull\s+album\b", r"\bparody\b"
+    ]
+    if any(re.search(pat, t_lower) for pat in negative_patterns):
+        return False
+
+    karaoke_keywords = [
+        "karaoke", "instrumental", "backing track", "backingtrack", "backing-track",
+        "minus one", "minus 1", "minusone", "off vocal", "no vocal", "vocal off",
+        "sing king", "singking", "karafun", "sunfly", "acoustic backing", "piano backing"
+    ]
+    has_kw = any(kw in t_lower for kw in karaoke_keywords)
+    is_k_channel = any(kw in u_lower for kw in ["karaoke", "karafun", "sing king", "sunfly"])
+    return has_kw or is_k_channel
+
+
+def is_sing_along_track(title: str, uploader: str = "") -> bool:
+    """Validates whether a track is a sing-along / lyric video with lead vocals."""
+    t_lower = title.lower()
+    u_lower = uploader.lower()
+
+    pure_karaoke_patterns = [
+        r"\bkaraoke\b", r"\binstrumental\b", r"\bbacking\s+track\b",
+        r"\boff\s+vocal\b", r"\bminus\s+one\b", r"\bno\s+vocal\b", r"\bvocal\s+off\b"
+    ]
+    if any(re.search(pat, t_lower) for pat in pure_karaoke_patterns):
+        return False
+
+    if any(kw in u_lower for kw in ["karafun", "sing king", "singking", "sunfly", "zoom karaoke"]):
+        return False
+
+    junk_patterns = [
+        r"\breaction\b", r"\breacts\b", r"\bvocal\s+coach\b",
+        r"\btutorial\b", r"\bfull\s+album\b", r"\bparody\b", r"\b10\s*hours?\b"
+    ]
+    if any(re.search(pat, t_lower) for pat in junk_patterns):
+        return False
+
+    lyric_indicators = [
+        "lyrics", "lyric video", "with lyrics", "lyrics on screen",
+        "sing along", "sing-along", "singalong"
+    ]
+    return any(ind in t_lower for ind in lyric_indicators)
+
+
 class TrackDownloader:
     def __init__(self, db_bridge: Optional[TikiDatabaseBridge] = None):
         self.db = db_bridge or TikiDatabaseBridge()
@@ -140,48 +206,130 @@ class TrackDownloader:
         self,
         query: str,
         limit: int = 10,
-        karaoke_only: bool = True
+        page: int = 1,
+        filter_mode: str = "all",
+        seen_video_ids: Optional[Set[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Searches YouTube for karaoke or official tracks via yt-dlp."""
-        search_query = query
-        if karaoke_only and "karaoke" not in query.lower():
-            search_query = f"{query} karaoke"
+        """
+        Searches YouTube with deep pagination, query cleaning, and Tiki Karaoke parity:
+        - filter_mode: 'all', 'singalong', or 'karaoke'
+        - page: 1-indexed pagination (deep candidate scanning)
+        - seen_video_ids: excludes previously returned songs across pages
+        """
+        clean_q = clean_search_query(query)
+        if not clean_q:
+            clean_q = query.strip()
+        if not clean_q:
+            return []
 
-        cmd = [
-            self.ytdlp_bin,
-            f"ytsearch{limit}:{search_query}",
-            "--dump-json",
-            "--flat-playlist",
-            "--no-warnings",
-            "--default-search", "ytsearch"
-        ]
+        seen = set(seen_video_ids) if seen_video_ids else set()
+        target_count = max(page * 25, 25)
 
-        results = []
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            for line in proc.stdout.splitlines():
-                if not line.strip():
-                    continue
+        # Build search queries based on filter mode
+        search_queries: List[Tuple[str, bool]] = []
+        if filter_mode == "singalong":
+            search_queries.append((f"ytsearch{target_count}:{clean_q} lyrics", True))
+        elif filter_mode == "karaoke":
+            search_queries.append((f"ytsearch{target_count}:{clean_q} karaoke", False))
+        else:
+            # All Tracks: balanced blend of karaoke stems and sing-along lyric videos
+            search_queries.append((f"ytsearch{target_count}:{clean_q} karaoke", False))
+            search_queries.append((f"ytsearch{target_count}:{clean_q} lyrics", True))
+
+        raw_candidates: List[Dict[str, Any]] = []
+
+        # 1. Primary: Python yt_dlp flat extraction (fast, reliable, handles warnings)
+        if yt_dlp is not None:
+            ydl_opts = {
+                "quiet": True,
+                "skip_download": True,
+                "extract_flat": True,
+                "no_warnings": True,
+                "socket_timeout": 8,
+                "retries": 2,
+                "nocheckcertificate": True,
+            }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    for sq, default_sa in search_queries:
+                        info = ydl.extract_info(sq, download=False)
+                        entries = list(info.get("entries") or []) if isinstance(info, dict) else []
+                        for e in entries:
+                            if e and isinstance(e, dict):
+                                e_copy = dict(e)
+                                e_copy["_hint_sa"] = default_sa
+                                raw_candidates.append(e_copy)
+            except Exception as e:
+                print(f"[TrackDownloader] yt_dlp API search warning: {e}", file=sys.stderr)
+
+        # 2. Fallback: CLI yt-dlp binary (check=False so warnings never blank out output)
+        if not raw_candidates:
+            for sq, default_sa in search_queries:
+                cmd = [
+                    self.ytdlp_bin,
+                    sq,
+                    "--dump-json",
+                    "--flat-playlist",
+                    "--no-warnings",
+                    "--default-search", "ytsearch"
+                ]
                 try:
-                    data = json.loads(line)
-                    raw_title = data.get("title", "")
-                    artist, title = parse_artist_title(raw_title)
-                    is_sing_along = bool(re.search(r"(?i)(sing-along|guide\s*vocal|lead\s*vocal|with\s*vocals)", raw_title))
+                    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                    for line in proc.stdout.splitlines():
+                        line = line.strip()
+                        if line:
+                            try:
+                                d = json.loads(line)
+                                d["_hint_sa"] = default_sa
+                                raw_candidates.append(d)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print(f"[TrackDownloader] CLI search warning: {e}", file=sys.stderr)
 
-                    results.append({
-                        "video_id": data.get("id", ""),
-                        "title": title,
-                        "artist": artist,
-                        "original_title": raw_title,
-                        "duration": int(data.get("duration") or 0),
-                        "channel": data.get("uploader", "") or data.get("channel", ""),
-                        "is_sing_along": is_sing_along,
-                        "url": data.get("url") or f"https://www.youtube.com/watch?v={data.get('id')}"
-                    })
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[TrackDownloader] Search failed: {e}", file=sys.stderr)
+        # 3. Filter, classify, and deduplicate candidates
+        results: List[Dict[str, Any]] = []
+        for e in raw_candidates:
+            vid = e.get("id") or ""
+            if not vid or vid in seen:
+                continue
+
+            duration = int(e.get("duration") or 0)
+            if duration > 660 or (duration > 0 and duration < 25):
+                continue
+
+            raw_title = e.get("title", "")
+            channel = e.get("uploader", "") or e.get("channel", "")
+
+            # Determine whether it's sing-along or karaoke
+            if is_sing_along_track(raw_title, channel):
+                is_sa = True
+            elif is_karaoke_track(raw_title, channel):
+                is_sa = False
+            else:
+                is_sa = bool(e.get("_hint_sa", False))
+
+            if filter_mode == "singalong" and not is_sa:
+                continue
+            if filter_mode == "karaoke" and is_sa:
+                continue
+
+            artist, title = parse_artist_title(raw_title)
+            seen.add(vid)
+
+            results.append({
+                "video_id": vid,
+                "title": title,
+                "artist": artist,
+                "original_title": raw_title,
+                "duration": duration,
+                "channel": channel,
+                "is_sing_along": is_sa,
+                "url": f"https://www.youtube.com/watch?v={vid}"
+            })
+
+            if len(results) >= limit:
+                break
 
         return results
 

@@ -104,9 +104,12 @@ class StudioCockpitWindow:
         self._download_cancel_event: Optional[threading.Event] = None
         self._drawer_expanded: bool = False
 
-        # Library Filter State
-        self._library_filter: str = "all"
+        # Library Filter & Search State
+        self._library_filter: str = "ready"
         self._filter_buttons: Dict[str, tk.Button] = {}
+        self._yt_current_page: int = 1
+        self._yt_seen_ids: Set[str] = set()
+        self._yt_current_query: str = ""
 
         # AI Vocal Warmup Studio & Reference Tone State
         self._warmup_routine: List[Dict[str, Any]] = []
@@ -1002,7 +1005,7 @@ class StudioCockpitWindow:
             relief="solid"
         )
         self.ent_search.pack(side="left", fill="x", expand=True, padx=10)
-        self.ent_search.bind("<Return>", lambda e: self._on_search_library())
+        self.ent_search.bind("<Return>", lambda e: self._on_search_unified())
 
         btn_search = tk.Button(
             search_bar,
@@ -1013,7 +1016,7 @@ class StudioCockpitWindow:
             bd=0,
             padx=12,
             pady=4,
-            command=self._on_search_library
+            command=self._on_click_search_library
         )
         btn_search.pack(side="left", padx=(0, 8))
 
@@ -1138,6 +1141,23 @@ class StudioCockpitWindow:
         # Select & Download Button Bar
         btn_bar = tk.Frame(parent, bg=COLOR_BG_MAIN)
         btn_bar.pack(fill="x", padx=12, pady=(4, 12))
+
+        self.btn_find_more = tk.Button(
+            btn_bar,
+            text="➕ Find More Results (YouTube)",
+            bg="#1c0f2b",
+            fg=COLOR_GOLD,
+            activebackground="#33144d",
+            activeforeground=COLOR_GOLD,
+            font=("Helvetica", 9, "bold"),
+            bd=1,
+            relief="solid",
+            padx=14,
+            pady=8,
+            command=self._on_find_more_youtube
+        )
+        self.btn_find_more.pack(side="left")
+        self.btn_find_more.pack_forget()  # Hidden until search produces YouTube items
 
         btn_select = tk.Button(
             btn_bar,
@@ -2372,16 +2392,17 @@ class StudioCockpitWindow:
                 btn.config(bg="#150a22", fg=COLOR_TEXT_MUTED)
         self._on_search_library()
 
+    def _on_click_search_library(self):
+        """Explicitly searches the offline local library and activates the Offline Ready filter."""
+        self._set_library_filter("ready")
+
     def _on_search_library(self):
         query = self.ent_search.get().strip() if hasattr(self, "ent_search") else ""
-        tracks = self.db.search_tracks(query, limit=100)
+        dl_only = (self._library_filter == "ready") or (not query and self._library_filter == "all")
+        sa_only = (self._library_filter == "singalong")
+        tracks = self.db.search_tracks(query, limit=100, sing_along_only=sa_only, downloaded_only=dl_only)
 
-        # Apply active filter
-        if self._library_filter == "ready":
-            tracks = [t for t in tracks if t.get("is_downloaded")]
-        elif self._library_filter == "singalong":
-            tracks = [t for t in tracks if t.get("is_sing_along")]
-        elif self._library_filter == "karaoke":
+        if self._library_filter == "karaoke":
             tracks = [t for t in tracks if not t.get("is_sing_along")]
 
         # Clear existing
@@ -2398,6 +2419,7 @@ class StudioCockpitWindow:
             self.tree_tracks.insert(
                 "",
                 "end",
+                iid=f"db_{t.get('id')}",
                 values=(
                     t.get("id"),
                     t.get("title"),
@@ -2408,6 +2430,68 @@ class StudioCockpitWindow:
                 ),
                 tags=(row_tag,)
             )
+
+        if hasattr(self, "btn_find_more"):
+            self.btn_find_more.pack_forget()
+
+        self.lbl_status.config(text=f"Library: Showing {len(tracks)} tracks.")
+
+    def _on_search_unified(self):
+        """Triggered on Enter/Return: Displays matching local tracks on top, and fetches 10 YouTube tracks below."""
+        query = self.ent_search.get().strip() if hasattr(self, "ent_search") else ""
+        if not query:
+            self._on_search_library()
+            return
+
+        self._yt_current_query = query
+        self._yt_current_page = 1
+        self._yt_seen_ids.clear()
+        self._yt_search_results.clear()
+
+        # 1. Fetch matching local library tracks
+        sa_only = (self._library_filter == "singalong")
+        local_tracks = self.db.search_tracks(query, limit=50, sing_along_only=sa_only, downloaded_only=True)
+        if self._library_filter == "karaoke":
+            local_tracks = [t for t in local_tracks if not t.get("is_sing_along")]
+
+        # Populate local tracks in table
+        for item in self.tree_tracks.get_children():
+            self.tree_tracks.delete(item)
+
+        for idx, t in enumerate(local_tracks):
+            vid = t.get("video_id")
+            if vid:
+                self._yt_seen_ids.add(vid)
+            dur_min = t.get("duration", 0) // 60
+            dur_sec = t.get("duration", 0) % 60
+            m_type = "Sing-Along 🎙️" if t.get("is_sing_along") else "Karaoke 🎵"
+            row_tag = "row_odd" if idx % 2 == 0 else "row_even"
+            self.tree_tracks.insert(
+                "",
+                "end",
+                iid=f"db_{t.get('id')}",
+                values=(
+                    t.get("id"),
+                    t.get("title"),
+                    t.get("artist"),
+                    f"{dur_min}:{dur_sec:02d}",
+                    m_type,
+                    "✅ Ready (Offline)"
+                ),
+                tags=(row_tag,)
+            )
+
+        self.lbl_status.config(
+            text=f"Found {len(local_tracks)} local tracks. Fetching YouTube suggestions for '{query}'...",
+            fg=COLOR_GOLD
+        )
+
+        # 2. In background, fetch 10 YouTube results matching active filter
+        threading.Thread(
+            target=self._run_youtube_search_worker,
+            args=(query, 1, False),
+            daemon=True
+        ).start()
 
     def _get_selected_quality_profile(self) -> str:
         """Determines the active video quality profile string."""
@@ -2625,42 +2709,107 @@ class StudioCockpitWindow:
             messagebox.showinfo("Search Query", "Please enter a song title or artist to search YouTube.")
             return
 
-        self.lbl_status.config(text="Searching YouTube via yt-dlp...")
+        self._yt_current_query = query
+        self._yt_current_page = 1
+        self._yt_seen_ids.clear()
+        self._yt_search_results.clear()
+
+        for item in self.tree_tracks.get_children():
+            self.tree_tracks.delete(item)
+
+        if hasattr(self, "btn_find_more"):
+            self.btn_find_more.pack_forget()
+
+        self.lbl_status.config(text=f"Searching YouTube for '{query}'...", fg=COLOR_GOLD)
         threading.Thread(
             target=self._run_youtube_search_worker,
-            args=(query,),
+            args=(query, 1, True),
             daemon=True
         ).start()
 
-    def _run_youtube_search_worker(self, query: str):
-        results = self.downloader.search_youtube(query, limit=10)
+    def _on_find_more_youtube(self):
+        query = getattr(self, "_yt_current_query", "").strip()
+        if not query:
+            query = self.ent_search.get().strip() if hasattr(self, "ent_search") else ""
+        if not query:
+            return
+
+        self._yt_current_page += 1
+        if hasattr(self, "btn_find_more"):
+            self.btn_find_more.config(text="⏳ Searching YouTube...", state="disabled")
+        self.lbl_status.config(text=f"Fetching more YouTube results (page {self._yt_current_page})...", fg=COLOR_GOLD)
+        threading.Thread(
+            target=self._run_youtube_search_worker,
+            args=(query, self._yt_current_page, False),
+            daemon=True
+        ).start()
+
+    def _run_youtube_search_worker(self, query: str, page: int = 1, clear_first: bool = False):
+        f_mode = self._library_filter if self._library_filter in ("singalong", "karaoke") else "all"
+        results = self.downloader.search_youtube(
+            query=query,
+            limit=10,
+            page=page,
+            filter_mode=f_mode,
+            seen_video_ids=self._yt_seen_ids
+        )
 
         def _update():
-            self._yt_search_results.clear()
-            for item in self.tree_tracks.get_children():
-                self.tree_tracks.delete(item)
+            if clear_first:
+                self._yt_search_results.clear()
+                for item in self.tree_tracks.get_children():
+                    self.tree_tracks.delete(item)
+
+            start_idx = len(self.tree_tracks.get_children())
+            added_count = 0
+            last_iid = None
+
             for idx, r in enumerate(results):
                 vid = r.get("video_id", "")
+                if not vid:
+                    continue
+                self._yt_seen_ids.add(vid)
                 self._yt_search_results[vid] = r
                 dur_min = r.get("duration", 0) // 60
                 dur_sec = r.get("duration", 0) % 60
-                m_type = "Sing-Along" if r.get("is_sing_along") else "Karaoke"
-                row_tag = "row_even" if idx % 2 == 0 else "row_odd"
-                self.tree_tracks.insert(
-                    "",
-                    "end",
-                    iid=f"yt_{vid}",
-                    values=(
-                        "YT",
-                        r.get("title"),
-                        r.get("artist"),
-                        f"{dur_min}:{dur_sec:02d}",
-                        m_type,
-                        "☁️ (Click to fetch)"
-                    ),
-                    tags=(row_tag,)
-                )
-            self.lbl_status.config(text=f"Found {len(results)} YouTube tracks. Double-click to download & rehearse.")
+                m_type = "Sing-Along 🎙️" if r.get("is_sing_along") else "Karaoke 🎵"
+                row_tag = "row_odd" if (start_idx + idx) % 2 == 0 else "row_even"
+                iid = f"yt_{vid}"
+                if not self.tree_tracks.exists(iid):
+                    self.tree_tracks.insert(
+                        "",
+                        "end",
+                        iid=iid,
+                        values=(
+                            "YT",
+                            r.get("title"),
+                            r.get("artist"),
+                            f"{dur_min}:{dur_sec:02d}",
+                            m_type,
+                            "☁️ (Click to fetch)"
+                        ),
+                        tags=(row_tag,)
+                    )
+                    last_iid = iid
+                    added_count += 1
+
+            if hasattr(self, "btn_find_more"):
+                self.btn_find_more.pack(side="left")
+                if added_count > 0:
+                    self.btn_find_more.config(text="➕ Find More Results (YouTube)", state="normal")
+                    self.lbl_status.config(
+                        text=f"Loaded {added_count} YouTube tracks (Total: {len(self.tree_tracks.get_children())}). Double-click to download & rehearse.",
+                        fg=COLOR_LIME
+                    )
+                else:
+                    self.btn_find_more.config(text="✓ No More YouTube Results", state="disabled")
+                    self.lbl_status.config(
+                        text="No additional unique results found on YouTube.",
+                        fg=COLOR_TEXT_MUTED
+                    )
+
+            if last_iid and page > 1:
+                self.tree_tracks.see(last_iid)
 
         self.dispatch_to_main(_update)
 

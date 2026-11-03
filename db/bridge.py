@@ -69,13 +69,20 @@ class TikiDatabaseBridge:
         self,
         query: str,
         limit: int = 50,
-        sing_along_only: bool = False
+        sing_along_only: bool = False,
+        downloaded_only: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Searches tracks using FTS5 (if available) with fallback to LIKE.
         Prefers local/downloaded tracks first, followed by title/artist match.
         """
         q = (query or "").strip()
+        params_base = {
+            "sa": 1 if sing_along_only else 0,
+            "dl": 1 if downloaded_only else 0,
+            "lim": limit
+        }
+
         if not q:
             # Return most recently added or played tracks
             sql = """
@@ -83,11 +90,12 @@ class TikiDatabaseBridge:
                        is_sing_along, media_type, cdg_path, genre, release_year
                 FROM tracks
                 WHERE (:sa = 0 OR is_sing_along = 1)
+                  AND (:dl = 0 OR is_downloaded = 1)
                 ORDER BY is_downloaded DESC, id DESC
                 LIMIT :lim;
             """
             with self._get_connection() as conn:
-                rows = conn.execute(sql, {"sa": 1 if sing_along_only else 0, "lim": limit}).fetchall()
+                rows = conn.execute(sql, params_base).fetchall()
                 return [dict(r) for r in rows]
 
         # 1. Try FTS5 Match
@@ -103,14 +111,13 @@ class TikiDatabaseBridge:
                         JOIN tracks t ON t.id = f.rowid
                         WHERE tracks_fts MATCH :match_q
                           AND (:sa = 0 OR t.is_sing_along = 1)
+                          AND (:dl = 0 OR t.is_downloaded = 1)
                         ORDER BY t.is_downloaded DESC, rank
                         LIMIT :lim;
                     """
-                    rows = conn.execute(sql_fts, {
-                        "match_q": fts_query,
-                        "sa": 1 if sing_along_only else 0,
-                        "lim": limit
-                    }).fetchall()
+                    p = dict(params_base)
+                    p["match_q"] = fts_query
+                    rows = conn.execute(sql_fts, p).fetchall()
                     if rows:
                         return [dict(r) for r in rows]
             except Exception:
@@ -124,15 +131,14 @@ class TikiDatabaseBridge:
             FROM tracks
             WHERE (title LIKE :term OR artist LIKE :term OR original_title LIKE :term)
               AND (:sa = 0 OR is_sing_along = 1)
+              AND (:dl = 0 OR is_downloaded = 1)
             ORDER BY is_downloaded DESC, id DESC
             LIMIT :lim;
         """
         with self._get_connection() as conn:
-            rows = conn.execute(sql_like, {
-                "term": like_term,
-                "sa": 1 if sing_along_only else 0,
-                "lim": limit
-            }).fetchall()
+            p = dict(params_base)
+            p["term"] = like_term
+            rows = conn.execute(sql_like, p).fetchall()
             return [dict(r) for r in rows]
 
     def get_track_by_id(self, track_id: int) -> Optional[Dict[str, Any]]:
