@@ -130,7 +130,7 @@ def extract_pitch_contour(
 
         # Calculate energy to skip quiet frames
         rms = np.sqrt(np.mean(frame ** 2))
-        if rms < 0.01:
+        if rms < 0.003:
             continue
 
         # Windowing
@@ -310,15 +310,15 @@ class VocalCalibrationManager:
         """
         audio, sr = read_wav_mono(wav_path)
         times, pitches = extract_pitch_contour(
-            audio, sr, min_hz=55.0, max_hz=1000.0, voicing_threshold=0.32
+            audio, sr, min_hz=55.0, max_hz=1000.0, voicing_threshold=0.25
         )
 
         voiced = pitches[pitches > 0]
-        if len(voiced) < 15:
+        if len(voiced) < 8:
             raise ValueError("Insufficient vocal signal detected. Please sing louder or check microphone input.")
 
-        # Apply 5-point moving median filter to eliminate transient octave jumps
-        kernel_size = 5
+        # Apply moving median/average filter to eliminate transient octave jumps
+        kernel_size = min(5, len(voiced))
         clean_pitches = np.convolve(voiced, np.ones(kernel_size) / kernel_size, mode="valid")
 
         # Use 3rd and 97th percentiles to avoid breath pops and spurious clicks

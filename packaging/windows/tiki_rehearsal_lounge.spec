@@ -54,6 +54,8 @@ bin_dir = spec_dir / 'bin'
 if bin_dir.exists():
     for f in bin_dir.glob('*.exe'):
         binaries.append((str(f), 'bin'))
+    for f in bin_dir.glob('*.dll'):
+        binaries.append((str(f), 'bin'))
 
 a = Analysis(
     [str(repo_root / 'main.py')],

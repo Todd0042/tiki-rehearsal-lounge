@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 # Studio Version
-STUDIO_VERSION = "1.0.1"
+STUDIO_VERSION = "1.0.2"
 
 # User Data Directories
 HOME_DIR = Path.home()
@@ -50,7 +50,15 @@ def get_bundled_binary_path(binary_name: str) -> Optional[Path]:
             if cand.is_file():
                 return cand
 
-    # 2. Check local application bin/
+    # 2. Check directory of running executable when frozen (one-dir or installed)
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        for sub in ["bin", "_internal/bin", ""]:
+            cand = exe_dir / sub / target_name if sub else exe_dir / target_name
+            if cand.is_file():
+                return cand
+
+    # 3. Check local application bin/
     app_root = Path(__file__).resolve().parent
     for sub in ["bin", "usr/bin", ""]:
         cand = app_root / sub / target_name if sub else app_root / target_name

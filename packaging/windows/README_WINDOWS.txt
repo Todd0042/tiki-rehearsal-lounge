@@ -1,4 +1,4 @@
-🌺 TIKI REHEARSAL LOUNGE — WINDOWS PRACTICE STUDIO (v1.0.1) 🍹
+🌺 TIKI REHEARSAL LOUNGE — WINDOWS PRACTICE STUDIO (v1.0.2) 🍹
 ========================================================================
 
 Welcome to Tiki Rehearsal Lounge!

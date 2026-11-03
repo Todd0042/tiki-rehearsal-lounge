@@ -315,7 +315,25 @@ class StudioCockpitWindow:
             cursor="hand2",
             command=self._open_settings_dialog
         )
-        self.btn_settings.pack(side="right", padx=(10, 0), pady=(2, 0))
+        self.btn_settings.pack(side="right", padx=(8, 0), pady=(2, 0))
+
+        # Persistent AI Coach Manager & Uninstaller Button
+        self.btn_header_ai = tk.Button(
+            title_row,
+            text="🤖 AI Coach: Manage / Uninstall",
+            font=("Helvetica", 9, "bold"),
+            bg="#301542",
+            fg=COLOR_GOLD,
+            activebackground="#4c1e68",
+            activeforeground="#ffffff",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._open_manage_models_dialog
+        )
+        self.btn_header_ai.pack(side="right", padx=(8, 0), pady=(2, 0))
 
         # Database Status Badge
         mode_text = "● Tiki Synced" if getattr(self, "_storage_mode", STORAGE_MODE) == "integrated" else "● Standalone"
@@ -885,16 +903,16 @@ class StudioCockpitWindow:
 
         btn_manage_ai = tk.Button(
             debrief_header,
-            text="⚙️ Manage AI Models",
+            text="🗑️ Uninstall / Manage AI Model",
             font=("Helvetica", 8, "bold"),
-            bg="#2a143f",
+            bg="#3b1548",
             fg=COLOR_GOLD,
-            activebackground="#451f68",
+            activebackground="#5a2070",
             activeforeground="#ffffff",
             bd=1,
             relief="solid",
-            padx=8,
-            pady=2,
+            padx=10,
+            pady=3,
             command=self._open_manage_models_dialog
         )
         btn_manage_ai.pack(side="right")
@@ -1472,13 +1490,32 @@ class StudioCockpitWindow:
         )
         warmup_card.pack(fill="x", pady=(16, 20))
 
+        warmup_top_row = tk.Frame(warmup_card, bg=COLOR_BG_CARD)
+        warmup_top_row.pack(fill="x", pady=(0, 8))
+
         tk.Label(
-            warmup_card,
+            warmup_top_row,
             text="Physiological warmups tailored to your vocal cords, power sweet spot, and selected song climax notes. Powered 100% offline.",
             font=("Helvetica", 9),
             fg=COLOR_TEXT_MUTED,
             bg=COLOR_BG_CARD
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(side="left", anchor="w")
+
+        btn_warmup_ai_mgr = tk.Button(
+            warmup_top_row,
+            text="⚙️ Manage / Uninstall AI Model",
+            font=("Helvetica", 8, "bold"),
+            bg="#2e153f",
+            fg=COLOR_GOLD,
+            activebackground="#4a1e68",
+            activeforeground="#ffffff",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=3,
+            command=self._open_manage_models_dialog
+        )
+        btn_warmup_ai_mgr.pack(side="right")
 
         # Dynamic Context Badges Bar
         ctx_bar = tk.Frame(warmup_card, bg="#13091e", bd=1, relief="solid", padx=10, pady=8)
@@ -2373,6 +2410,18 @@ class StudioCockpitWindow:
                 self.lbl_ai_install_status.config(text="Ready to install")
             if hasattr(self, "prog_ai") and self.prog_ai.winfo_exists():
                 self.prog_ai.pack_forget()
+
+        if hasattr(self, "btn_header_ai"):
+            if installed:
+                self.btn_header_ai.config(
+                    text=f"🤖 AI Coach ({installed.get('key', '').upper()} Active) • Manage/Uninstall",
+                    fg=COLOR_GOLD
+                )
+            else:
+                self.btn_header_ai.config(
+                    text="🤖 AI Coach: Manage / Install",
+                    fg=COLOR_TEXT_MUTED
+                )
 
         self.root.update_idletasks()
         if hasattr(self, "report_canvas"):
@@ -3373,9 +3422,10 @@ class StudioCockpitWindow:
                     f"• Total Span: {res['range_semitones']:.1f} semitones ({res['octaves']} octaves)\n\n"
                     f"Profile updated and saved to vocal_profile.json!"
                 )
-                self.root.after_idle(lambda: messagebox.showinfo("Exercise 1 Complete", msg))
+                self.root.after_idle(lambda: messagebox.showinfo("Exercise 1 Complete", msg, parent=self.root))
             except Exception as e:
-                self.root.after_idle(lambda: messagebox.showerror("Calibration Notice", str(e)))
+                self.root.after_idle(lambda err=str(e): self.lbl_status.config(text=f"⚠️ Siren Glide: {err}", fg=COLOR_GOLD))
+                self.root.after_idle(lambda err=str(e): messagebox.showerror("Calibration Notice", err, parent=self.root))
             finally:
                 self.root.after_idle(
                     lambda: self.btn_run_ex1.config(
@@ -3383,9 +3433,6 @@ class StudioCockpitWindow:
                         bg="#2a1640",
                         fg=COLOR_CYAN
                     )
-                )
-                self.root.after_idle(
-                    lambda: self.lbl_status.config(text="Ready. Select a song or run calibration.")
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -3439,9 +3486,10 @@ class StudioCockpitWindow:
                     f"• Voice Category: {self.vocal_profile.vocal_type}\n\n"
                     f"Profile updated and saved to vocal_profile.json!"
                 )
-                self.root.after_idle(lambda: messagebox.showinfo("Exercise 2 Complete", msg))
+                self.root.after_idle(lambda: messagebox.showinfo("Exercise 2 Complete", msg, parent=self.root))
             except Exception as e:
-                self.root.after_idle(lambda: messagebox.showerror("Anchor Notice", str(e)))
+                self.root.after_idle(lambda err=str(e): self.lbl_status.config(text=f"⚠️ Speaking Anchor: {err}", fg=COLOR_GOLD))
+                self.root.after_idle(lambda err=str(e): messagebox.showerror("Anchor Notice", err, parent=self.root))
             finally:
                 self.root.after_idle(
                     lambda: self.btn_run_ex2.config(
@@ -4075,7 +4123,7 @@ class StudioCockpitWindow:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("⚙️ Studio Settings & Storage Configuration")
-        dlg.geometry("580x560")
+        dlg.geometry("580x640")
         dlg.configure(bg=COLOR_BG_MAIN)
         dlg.transient(self.root)
         dlg.grab_set()
@@ -4086,7 +4134,7 @@ class StudioCockpitWindow:
         ry = self.root.winfo_rooty()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
-        dlg.geometry(f"+{rx + max(0, (rw - 580) // 2)}+{ry + max(0, (rh - 560) // 2)}")
+        dlg.geometry(f"+{rx + max(0, (rw - 580) // 2)}+{ry + max(0, (rh - 640) // 2)}")
 
         # Header Frame
         hdr = tk.Frame(dlg, bg="#1a1025", padx=18, pady=14)
@@ -4230,6 +4278,68 @@ class StudioCockpitWindow:
         cur_lufs = float(cfg.get("target_lufs", -16.0))
         cbo_lufs.current(0 if cur_lufs <= -20.0 else 1)
         cbo_lufs.pack(side="left")
+
+        # 4. Offline AI Vocal Coach Section
+        ai_card = tk.LabelFrame(
+            form,
+            text=" 🤖 OFFLINE AI VOCAL COACH MODULE ",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_GOLD,
+            bg="#150a22",
+            padx=12,
+            pady=8
+        )
+        ai_card.pack(fill="x", pady=(8, 10))
+
+        installed_ai = self.offline_coach.get_installed_model()
+        if installed_ai:
+            p = installed_ai.get("path")
+            size_mb = p.stat().st_size / (1024 * 1024) if p and p.exists() else 0
+            tk.Label(
+                ai_card,
+                text=f"Active: {installed_ai.get('name')} ({size_mb / 1024:.2f} GB)",
+                font=("Helvetica", 9, "bold"),
+                fg=COLOR_LIME,
+                bg="#150a22"
+            ).pack(side="left")
+
+            def _settings_uninstall():
+                dlg.destroy()
+                self._open_manage_models_dialog()
+
+            tk.Button(
+                ai_card,
+                text="🗑️ Manage / Uninstall Model",
+                font=("Helvetica", 8, "bold"),
+                bg="#401018",
+                fg=COLOR_DANGER,
+                padx=10,
+                pady=3,
+                command=_settings_uninstall
+            ).pack(side="right")
+        else:
+            tk.Label(
+                ai_card,
+                text="Status: No model installed (Using built-in rules)",
+                font=("Helvetica", 8),
+                fg=COLOR_TEXT_MUTED,
+                bg="#150a22"
+            ).pack(side="left")
+
+            def _settings_download():
+                dlg.destroy()
+                self.notebook.select(self.tab_studio)
+
+            tk.Button(
+                ai_card,
+                text="📥 Install AI Model",
+                font=("Helvetica", 8, "bold"),
+                bg="#2a143f",
+                fg=COLOR_CYAN,
+                padx=10,
+                pady=3,
+                command=_settings_download
+            ).pack(side="right")
 
         # Status / Feedback label
         lbl_msg = tk.Label(form, text="", font=("Helvetica", 8, "bold"), fg=COLOR_DANGER, bg=COLOR_BG_MAIN)
