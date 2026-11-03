@@ -91,6 +91,18 @@ class StudioCockpitWindow:
         self._download_cancel_event: Optional[threading.Event] = None
         self._drawer_expanded: bool = False
 
+        # Library Filter State
+        self._library_filter: str = "all"
+        self._filter_buttons: Dict[str, tk.Button] = {}
+
+        # AI Vocal Warmup Studio State
+        self._warmup_routine: List[Dict[str, Any]] = []
+        self._warmup_step_idx: int = 0
+        self._warmup_timer_seconds: int = 35
+        self._warmup_timer_running: bool = False
+        self._warmup_timer_job: Optional[str] = None
+        self._is_generating_warmup: bool = False
+
         # Session State
         self.selected_track: Optional[Dict[str, Any]] = None
         self.current_key_shift: int = 0
@@ -136,6 +148,69 @@ class StudioCockpitWindow:
             "TNotebook.Tab",
             background=[("selected", COLOR_BORDER), ("active", COLOR_BG_CARD_HOVER)],
             foreground=[("selected", COLOR_CYAN), ("active", COLOR_TEXT_MAIN)]
+        )
+
+        # Option B: Vibrant Synthwave Neon Scrollbar (Hot Magenta thumb on dark violet trough)
+        style.configure(
+            "Vertical.TScrollbar",
+            gripcount=0,
+            background="#ff2a85",          # Hot magenta thumb
+            darkcolor="#ff2a85",
+            lightcolor="#ff5c9f",
+            troughcolor="#12081c",        # Dark tropical violet trough
+            bordercolor="#12081c",
+            arrowcolor="#00f5d4",         # Cyan arrows
+            arrowsize=11
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", "#ff5c9f"), ("pressed", "#d61c6b"), ("disabled", "#33162b")],
+            arrowcolor=[("active", "#ffffff")]
+        )
+
+        style.configure(
+            "Horizontal.TScrollbar",
+            gripcount=0,
+            background="#ff2a85",
+            darkcolor="#ff2a85",
+            lightcolor="#ff5c9f",
+            troughcolor="#12081c",
+            bordercolor="#12081c",
+            arrowcolor="#00f5d4",
+            arrowsize=11
+        )
+        style.map(
+            "Horizontal.TScrollbar",
+            background=[("active", "#ff5c9f"), ("pressed", "#d61c6b")]
+        )
+
+        # Themed Song Library Treeview Table
+        style.configure(
+            "Treeview",
+            background="#150a22",
+            foreground="#ffffff",
+            fieldbackground="#150a22",
+            rowheight=28,
+            font=("Helvetica", 9),
+            borderwidth=0
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", "#00f5d4")],
+            foreground=[("selected", "#000000")]
+        )
+        style.configure(
+            "Treeview.Heading",
+            background="#25123a",
+            foreground="#00f5d4",
+            font=("Helvetica", 9, "bold"),
+            relief="flat",
+            padding=[8, 6]
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", "#381c56")],
+            foreground=[("active", "#ffffff")]
         )
 
     def _build_header(self):
@@ -198,9 +273,9 @@ class StudioCockpitWindow:
         self.notebook.add(self.tab_library, text="🎵 Song Library & Downloader")
         self._build_library_tab(self.tab_library)
 
-        # Tab 3: Vocal Calibration
+        # Tab 3: Vocal Calibration & Warmup
         self.tab_calib = tk.Frame(self.notebook, bg=COLOR_BG_MAIN)
-        self.notebook.add(self.tab_calib, text="🎙️ Vocal Calibration")
+        self.notebook.add(self.tab_calib, text="🎙️ Vocal Calibration & Warmup")
         self._build_calibration_tab(self.tab_calib)
 
     # -------------------------------------------------------------
@@ -862,9 +937,9 @@ class StudioCockpitWindow:
     # TAB 2: LIBRARY & DOWNLOADER
     # -------------------------------------------------------------
     def _build_library_tab(self, parent: tk.Frame):
-        # Search & Filter Bar
+        # Search Bar
         search_bar = tk.Frame(parent, bg=COLOR_BG_CARD, padx=12, pady=10)
-        search_bar.pack(fill="x", padx=12, pady=(12, 6))
+        search_bar.pack(fill="x", padx=12, pady=(12, 4))
 
         tk.Label(
             search_bar,
@@ -912,9 +987,46 @@ class StudioCockpitWindow:
         )
         btn_yt.pack(side="left")
 
+        # Quick Filter Chips Bar
+        filter_bar = tk.Frame(parent, bg=COLOR_BG_MAIN, padx=12, pady=4)
+        filter_bar.pack(fill="x", pady=(2, 6))
+
+        tk.Label(
+            filter_bar,
+            text="FILTER BY:",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_BG_MAIN
+        ).pack(side="left", padx=(0, 6))
+
+        filters = [
+            ("all", "🌴 All Tracks"),
+            ("ready", "✅ Offline Ready"),
+            ("singalong", "🎙️ Sing-Along Guides"),
+            ("karaoke", "🎵 Karaoke Stems"),
+        ]
+        self._filter_buttons = {}
+        for f_key, f_label in filters:
+            btn = tk.Button(
+                filter_bar,
+                text=f_label,
+                font=("Helvetica", 8, "bold"),
+                bg="#2a1240" if self._library_filter == f_key else "#150a22",
+                fg=COLOR_CYAN if self._library_filter == f_key else COLOR_TEXT_MUTED,
+                activebackground="#3b1b59",
+                activeforeground=COLOR_CYAN,
+                bd=1,
+                relief="solid",
+                padx=10,
+                pady=3,
+                command=lambda k=f_key: self._set_library_filter(k)
+            )
+            btn.pack(side="left", padx=3)
+            self._filter_buttons[f_key] = btn
+
         # Results Table
         table_frame = tk.Frame(parent, bg=COLOR_BG_MAIN)
-        table_frame.pack(fill="both", expand=True, padx=12, pady=6)
+        table_frame.pack(fill="both", expand=True, padx=12, pady=4)
 
         columns = ("id", "title", "artist", "duration", "type", "downloaded")
         self.tree_tracks = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
@@ -924,16 +1036,20 @@ class StudioCockpitWindow:
         self.tree_tracks.heading("artist", text="Artist")
         self.tree_tracks.heading("duration", text="Duration")
         self.tree_tracks.heading("type", text="Type")
-        self.tree_tracks.heading("downloaded", text="Ready")
+        self.tree_tracks.heading("downloaded", text="Readiness Status")
 
         self.tree_tracks.column("id", width=50, anchor="center")
         self.tree_tracks.column("title", width=340)
         self.tree_tracks.column("artist", width=220)
         self.tree_tracks.column("duration", width=80, anchor="center")
-        self.tree_tracks.column("type", width=120, anchor="center")
-        self.tree_tracks.column("downloaded", width=70, anchor="center")
+        self.tree_tracks.column("type", width=140, anchor="center")
+        self.tree_tracks.column("downloaded", width=140, anchor="center")
 
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_tracks.yview)
+        # Striped rows styling
+        self.tree_tracks.tag_configure("row_odd", background="#150a22", foreground="#ffffff")
+        self.tree_tracks.tag_configure("row_even", background="#1c0d2e", foreground="#ffffff")
+
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_tracks.yview, style="Vertical.TScrollbar")
         self.tree_tracks.configure(yscrollcommand=scrollbar.set)
 
         self.tree_tracks.pack(side="left", fill="both", expand=True)
@@ -958,12 +1074,49 @@ class StudioCockpitWindow:
         )
         btn_select.pack(side="right")
 
+        # Initial populate
+        self.root.after_idle(self._on_search_library)
+
     # -------------------------------------------------------------
-    # TAB 3: VOCAL CALIBRATION
+    # TAB 3: VOCAL CALIBRATION & WARMUP
     # -------------------------------------------------------------
     def _build_calibration_tab(self, parent: tk.Frame):
-        container = tk.Frame(parent, bg=COLOR_BG_MAIN, padx=20, pady=16)
-        container.pack(fill="both", expand=True)
+        self.calib_canvas = tk.Canvas(parent, bg=COLOR_BG_MAIN, bd=0, highlightthickness=0)
+        self.calib_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.calib_canvas.yview, style="Vertical.TScrollbar")
+        container = tk.Frame(self.calib_canvas, bg=COLOR_BG_MAIN, padx=20, pady=16)
+
+        canvas_win = self.calib_canvas.create_window((0, 0), window=container, anchor="nw")
+
+        def _on_calib_canvas_configure(e):
+            self.calib_canvas.itemconfig(canvas_win, width=e.width)
+
+        def _on_calib_content_configure(event):
+            self.calib_canvas.configure(scrollregion=self.calib_canvas.bbox("all"))
+            wrap = max(380, event.width - 80)
+            if hasattr(self, "lbl_warmup_song_context") and self.lbl_warmup_song_context.winfo_exists():
+                self.lbl_warmup_song_context.config(wraplength=wrap)
+            if hasattr(self, "lbl_warmup_purpose") and self.lbl_warmup_purpose.winfo_exists():
+                self.lbl_warmup_purpose.config(wraplength=wrap)
+            if hasattr(self, "lbl_warmup_mechanics") and self.lbl_warmup_mechanics.winfo_exists():
+                self.lbl_warmup_mechanics.config(wraplength=wrap)
+
+        container.bind("<Configure>", _on_calib_content_configure)
+        self.calib_canvas.bind("<Configure>", _on_calib_canvas_configure)
+        self.calib_canvas.configure(yscrollcommand=self.calib_scrollbar.set)
+
+        def _on_calib_mousewheel(event):
+            if not hasattr(self, "calib_canvas") or not self.calib_canvas.winfo_exists():
+                return
+            if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
+                self.calib_canvas.yview_scroll(-2, "units")
+            elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
+                self.calib_canvas.yview_scroll(2, "units")
+
+        self.calib_canvas.bind("<Enter>", lambda e: self.calib_canvas.bind_all("<Button-4>", _on_calib_mousewheel) or self.calib_canvas.bind_all("<Button-5>", _on_calib_mousewheel) or self.calib_canvas.bind_all("<MouseWheel>", _on_calib_mousewheel))
+        self.calib_canvas.bind("<Leave>", lambda e: self.calib_canvas.unbind_all("<Button-4>") or self.calib_canvas.unbind_all("<Button-5>") or self.calib_canvas.unbind_all("<MouseWheel>"))
+
+        self.calib_canvas.pack(side="left", fill="both", expand=True)
+        self.calib_scrollbar.pack(side="right", fill="y")
 
         # Profile Summary Card
         prof_card = tk.LabelFrame(
@@ -1095,6 +1248,271 @@ class StudioCockpitWindow:
             command=self._on_record_speaking_anchor
         )
         self.btn_run_ex2.pack(fill="x")
+
+        # -------------------------------------------------------------
+        # AI VOCAL WARMUP STUDIO (MAESTRO TIKI)
+        # -------------------------------------------------------------
+        warmup_card = tk.LabelFrame(
+            container,
+            text=" 🌺 AI VOCAL WARMUP STUDIO (MAESTRO TIKI) ",
+            bg=COLOR_BG_CARD,
+            fg=COLOR_MAGENTA,
+            font=("Helvetica", 11, "bold"),
+            bd=1,
+            relief="solid",
+            padx=16,
+            pady=16
+        )
+        warmup_card.pack(fill="x", pady=(16, 20))
+
+        tk.Label(
+            warmup_card,
+            text="Physiological warmups tailored to your vocal cords, power sweet spot, and selected song climax notes. Powered 100% offline.",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_BG_CARD
+        ).pack(anchor="w", pady=(0, 10))
+
+        # Dynamic Context Badges Bar
+        ctx_bar = tk.Frame(warmup_card, bg="#13091e", bd=1, relief="solid", padx=10, pady=8)
+        ctx_bar.pack(fill="x", pady=(0, 12))
+
+        self.lbl_warmup_voice_badge = tk.Label(
+            ctx_bar,
+            text="👤 Voice: Calibrated Profile",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_CYAN,
+            bg="#13091e"
+        )
+        self.lbl_warmup_voice_badge.pack(side="left", padx=(0, 12))
+
+        self.lbl_warmup_song_badge = tk.Label(
+            ctx_bar,
+            text="🎵 Track: No Track Loaded",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_GOLD,
+            bg="#13091e"
+        )
+        self.lbl_warmup_song_badge.pack(side="left", padx=12)
+
+        self.lbl_warmup_key_badge = tk.Label(
+            ctx_bar,
+            text="🎹 Key Shift: 0 st",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_LIME,
+            bg="#13091e"
+        )
+        self.lbl_warmup_key_badge.pack(side="left", padx=12)
+
+        # Routines & Presets Bar
+        routine_bar = tk.Frame(warmup_card, bg=COLOR_BG_CARD)
+        routine_bar.pack(fill="x", pady=(0, 12))
+
+        tk.Label(
+            routine_bar,
+            text="ROUTINES:",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_BG_CARD
+        ).pack(side="left", padx=(0, 6))
+
+        presets = [
+            ("3min", "⚡ 3-Min Wakeup"),
+            ("climax", "🚀 Climax Stretch"),
+            ("formant", "💎 Formant Ring"),
+            ("tension", "🌊 Tension Release")
+        ]
+        for p_key, p_label in presets:
+            tk.Button(
+                routine_bar,
+                text=p_label,
+                font=("Helvetica", 8, "bold"),
+                bg="#231038",
+                fg=COLOR_TEXT_MAIN,
+                activebackground="#3b1b59",
+                activeforeground=COLOR_CYAN,
+                bd=1,
+                relief="solid",
+                padx=8,
+                pady=4,
+                command=lambda k=p_key: self._load_warmup_preset(k)
+            ).pack(side="left", padx=3)
+
+        self.btn_gen_warmup = tk.Button(
+            routine_bar,
+            text="✨ Generate Song-Adaptive Routine (Offline AI)",
+            font=("Helvetica", 8, "bold"),
+            bg="#ff2a85",
+            fg="#ffffff",
+            activebackground="#ff5c9f",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=12,
+            pady=5,
+            command=self._on_generate_ai_warmup
+        )
+        self.btn_gen_warmup.pack(side="right")
+
+        self.lbl_warmup_status = tk.Label(
+            warmup_card,
+            text="",
+            font=("Helvetica", 8, "italic"),
+            fg=COLOR_CYAN,
+            bg=COLOR_BG_CARD
+        )
+        self.lbl_warmup_status.pack(anchor="w", pady=(0, 6))
+
+        # Interactive Exercise Player Card
+        player_card = tk.Frame(warmup_card, bg="#10071a", bd=1, relief="solid", padx=16, pady=14)
+        player_card.pack(fill="x")
+
+        p_header = tk.Frame(player_card, bg="#10071a")
+        p_header.pack(fill="x", pady=(0, 4))
+
+        self.lbl_warmup_step_num = tk.Label(
+            p_header,
+            text="EXERCISE 1 OF 4",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_CYAN,
+            bg="#10071a"
+        )
+        self.lbl_warmup_step_num.pack(side="left")
+
+        self.lbl_warmup_category = tk.Label(
+            p_header,
+            text="BREATH & CORE PHONATION",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_MAGENTA,
+            bg="#10071a"
+        )
+        self.lbl_warmup_category.pack(side="right")
+
+        self.lbl_warmup_title = tk.Label(
+            player_card,
+            text="Diaphragmatic Breath & Lip Trill Glide",
+            font=("Helvetica", 14, "bold"),
+            fg="#ffffff",
+            bg="#10071a"
+        )
+        self.lbl_warmup_title.pack(anchor="w", pady=(2, 6))
+
+        self.lbl_warmup_target_notes = tk.Label(
+            player_card,
+            text="🎶 Target Notes: C3 ➔ E3 ➔ C3",
+            font=("Helvetica", 10, "bold"),
+            fg=COLOR_GOLD,
+            bg="#10071a"
+        )
+        self.lbl_warmup_target_notes.pack(anchor="w", pady=(0, 6))
+
+        self.lbl_warmup_song_context = tk.Label(
+            player_card,
+            text="🎵 Song Connection: Calibrates breath support to sustain clean line ends.",
+            font=("Helvetica", 9, "italic"),
+            fg="#b0a2cc",
+            bg="#10071a",
+            wraplength=640,
+            justify="left"
+        )
+        self.lbl_warmup_song_context.pack(anchor="w", pady=(0, 6))
+
+        self.lbl_warmup_purpose = tk.Label(
+            player_card,
+            text="🎯 Purpose: Awakens vocal cords without friction while establishing subglottic air pressure.",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MAIN,
+            bg="#10071a",
+            wraplength=640,
+            justify="left"
+        )
+        self.lbl_warmup_purpose.pack(anchor="w", pady=(0, 4))
+
+        self.lbl_warmup_mechanics = tk.Label(
+            player_card,
+            text="🛠️ Mechanics: Expand your lower ribcage like an umbrella. Blow relaxed, steady air through loose fluttering lips on a gentle 5-tone descending glide. Zero throat squeeze.",
+            font=("Helvetica", 9),
+            fg="#e0d6f5",
+            bg="#10071a",
+            wraplength=640,
+            justify="left"
+        )
+        self.lbl_warmup_mechanics.pack(anchor="w", pady=(0, 12))
+
+        # Controls & Countdown Timer Row
+        timer_row = tk.Frame(player_card, bg="#10071a")
+        timer_row.pack(fill="x", pady=(6, 2))
+
+        # Big neon countdown timer
+        self.lbl_warmup_timer = tk.Label(
+            timer_row,
+            text="00:35",
+            font=("Helvetica", 22, "bold"),
+            fg=COLOR_CYAN,
+            bg="#10071a"
+        )
+        self.lbl_warmup_timer.pack(side="left", padx=(0, 16))
+
+        self.btn_warmup_timer_toggle = tk.Button(
+            timer_row,
+            text="▶ Start Timer",
+            font=("Helvetica", 9, "bold"),
+            bg=COLOR_CYAN,
+            fg="#000000",
+            activebackground="#5cf8e2",
+            bd=0,
+            padx=14,
+            pady=5,
+            command=self._toggle_warmup_timer
+        )
+        self.btn_warmup_timer_toggle.pack(side="left", padx=4)
+
+        self.btn_warmup_timer_reset = tk.Button(
+            timer_row,
+            text="↺ Reset",
+            font=("Helvetica", 9, "bold"),
+            bg="#231038",
+            fg=COLOR_TEXT_MAIN,
+            activebackground="#3b1b59",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=4,
+            command=self._reset_warmup_timer
+        )
+        self.btn_warmup_timer_reset.pack(side="left", padx=4)
+
+        self.btn_warmup_next = tk.Button(
+            timer_row,
+            text="Next Step ➔",
+            font=("Helvetica", 9, "bold"),
+            bg="#2e144a",
+            fg=COLOR_CYAN,
+            activebackground="#461e70",
+            bd=1,
+            relief="solid",
+            padx=14,
+            pady=4,
+            command=self._next_warmup_step
+        )
+        self.btn_warmup_next.pack(side="right")
+
+        self.btn_warmup_prev = tk.Button(
+            timer_row,
+            text="⏮️ Prev Step",
+            font=("Helvetica", 9, "bold"),
+            bg="#231038",
+            fg=COLOR_TEXT_MUTED,
+            activebackground="#3b1b59",
+            bd=1,
+            relief="solid",
+            padx=12,
+            pady=4,
+            command=self._prev_warmup_step
+        )
+        self.btn_warmup_prev.pack(side="right", padx=6)
+
+        # Initialize Warmup Routine & Badges
+        self.root.after_idle(self._init_warmup_studio)
 
     def _build_footer(self):
         footer = tk.Frame(self.root, bg=COLOR_BG_MAIN)
@@ -1242,6 +1660,7 @@ class StudioCockpitWindow:
         self.lbl_key_val.config(text=f"Key Shift: {sign}")
         if self.player.is_playing:
             self.player.set_key_shift(shift)
+        self._refresh_warmup_context()
 
     def _on_auto_match_key(self):
         if not self.selected_track:
@@ -1649,19 +2068,37 @@ class StudioCockpitWindow:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _set_library_filter(self, filter_key: str):
+        self._library_filter = filter_key
+        for k, btn in self._filter_buttons.items():
+            if k == filter_key:
+                btn.config(bg="#2a1240", fg=COLOR_CYAN)
+            else:
+                btn.config(bg="#150a22", fg=COLOR_TEXT_MUTED)
+        self._on_search_library()
+
     def _on_search_library(self):
-        query = self.ent_search.get().strip()
-        tracks = self.db.search_tracks(query, limit=50)
+        query = self.ent_search.get().strip() if hasattr(self, "ent_search") else ""
+        tracks = self.db.search_tracks(query, limit=100)
+
+        # Apply active filter
+        if self._library_filter == "ready":
+            tracks = [t for t in tracks if t.get("is_downloaded")]
+        elif self._library_filter == "singalong":
+            tracks = [t for t in tracks if t.get("is_sing_along")]
+        elif self._library_filter == "karaoke":
+            tracks = [t for t in tracks if not t.get("is_sing_along")]
 
         # Clear existing
         for item in self.tree_tracks.get_children():
             self.tree_tracks.delete(item)
 
-        for t in tracks:
+        for idx, t in enumerate(tracks):
             dur_min = t.get("duration", 0) // 60
             dur_sec = t.get("duration", 0) % 60
             m_type = "Sing-Along 🎙️" if t.get("is_sing_along") else "Karaoke 🎵"
-            ready = "✅" if t.get("is_downloaded") else "☁️"
+            ready = "✅ Ready (Offline)" if t.get("is_downloaded") else "☁️ Fetch / Stream"
+            row_tag = "row_odd" if idx % 2 == 0 else "row_even"
 
             self.tree_tracks.insert(
                 "",
@@ -1673,7 +2110,8 @@ class StudioCockpitWindow:
                     f"{dur_min}:{dur_sec:02d}",
                     m_type,
                     ready
-                )
+                ),
+                tags=(row_tag,)
             )
 
     def _on_select_track(self):
@@ -1697,6 +2135,9 @@ class StudioCockpitWindow:
         )
         self.notebook.select(self.tab_studio)
         self.lbl_status.config(text=f"Loaded '{track.get('title')}' into rehearsal cockpit.")
+
+        # Update warmup context immediately
+        self._refresh_warmup_context()
 
     def _on_search_youtube(self):
         query = self.ent_search.get().strip()
@@ -1890,7 +2331,330 @@ class StudioCockpitWindow:
             tess_str = "-- to -- (Pending Step 2)"
         self.lbl_prof_tessitura.config(text=f"Power Tessitura Sweet Spot: {tess_str}")
 
+        # Update warmup context with newly calibrated profile
+        self._refresh_warmup_context()
+
+    # -------------------------------------------------------------
+    # AI VOCAL WARMUP STUDIO CONTROLLER METHODS
+    # -------------------------------------------------------------
+    def _init_warmup_studio(self):
+        self._refresh_warmup_context()
+        self._load_warmup_preset("3min")
+
+    def _refresh_warmup_context(self):
+        if not hasattr(self, "lbl_warmup_voice_badge") or not self.lbl_warmup_voice_badge.winfo_exists():
+            return
+
+        # Voice profile context
+        p = self.vocal_profile or self.calibrator.load_profile()
+        if p and (p.tessitura_min_note or p.vocal_type):
+            v_type = p.vocal_type or "Contemporary Vocalist"
+            min_n = p.tessitura_min_note or "C3"
+            max_n = p.tessitura_max_note or "G4"
+            self.lbl_warmup_voice_badge.config(
+                text=f"👤 Voice: {v_type} ({min_n} ➔ {max_n})",
+                fg=COLOR_CYAN
+            )
+        else:
+            self.lbl_warmup_voice_badge.config(
+                text="👤 Voice: Calibrated Vocalist (Default)",
+                fg=COLOR_TEXT_MUTED
+            )
+
+        # Selected song context
+        if self.selected_track:
+            title = self.selected_track.get("title", "Rehearsal Song")
+            artist = self.selected_track.get("artist", "")
+            disp_title = f"{title[:26]}..." if len(title) > 26 else title
+            song_txt = f"🎵 Track: {disp_title}" + (f" ({artist[:16]})" if artist else "")
+            self.lbl_warmup_song_badge.config(text=song_txt, fg=COLOR_GOLD)
+        else:
+            self.lbl_warmup_song_badge.config(text="🎵 Track: No Track Loaded (Tab 2)", fg=COLOR_TEXT_MUTED)
+
+        # Key shift & climax notes
+        shift_str = f"{self.current_key_shift:+d}" if self.current_key_shift != 0 else "0"
+        self.lbl_warmup_key_badge.config(text=f"🎹 Key: {shift_str} st", fg=COLOR_LIME)
+
+    def _load_warmup_preset(self, preset_key: str):
+        p = self.vocal_profile or self.calibrator.load_profile()
+        vocal_type = p.vocal_type if p else "Calibrated Vocalist"
+        sweet_min = p.tessitura_min_note if (p and p.tessitura_min_note) else "C3"
+        sweet_max = p.tessitura_max_note if (p and p.tessitura_max_note) else "G4"
+        anchor = p.anchor_note if (p and p.anchor_note) else "E3"
+        song_title = self.selected_track.get("title", "Your Song") if self.selected_track else "Your Song"
+
+        if preset_key == "climax":
+            routine = [
+                {
+                    "step_num": 1,
+                    "title": "Semi-Occluded Straw / Trill Glides",
+                    "category": "SOVT Aerodynamic Balance",
+                    "target_notes": f"{sweet_min} ➔ {anchor} (Gentle 5ths)",
+                    "duration_s": 35,
+                    "purpose": "Balances acoustic backpressure across vocal folds to safeguard cords before high belts.",
+                    "mechanics": "Sing through a narrow straw or rolled 'Brrr' lips on gentle 5th sweeps. Keep cheeks puffed like a blowfish and abdominal wall gently engaged.",
+                    "song_context": f"Safeguards folds from friction during dynamic surges in '{song_title}'."
+                },
+                {
+                    "step_num": 2,
+                    "title": "Pharyngeal Twang & Narrow Pharynx ('Nay / Gee')",
+                    "category": "Upper Formant Focus",
+                    "target_notes": f"{anchor} ➔ {sweet_max}",
+                    "duration_s": 40,
+                    "purpose": "Narrows the epilarynx tube to add intense vocal ring without pushing unnecessary breath pressure.",
+                    "mechanics": "Sing a playful, brassy 'Nay-nay-nay' with a high tongue back and relaxed jaw. Keep the tone bright, laser-focused, and centered.",
+                    "song_context": f"Prepares your mix voice for the melodic climb in '{song_title}'."
+                },
+                {
+                    "step_num": 3,
+                    "title": "Song Climax Target Sirens ('Ooo ➔ Aaa')",
+                    "category": "High Belt & Range Extension",
+                    "target_notes": f"{anchor} ➔ {sweet_max} (Climax + Key {self.current_key_shift:+d})",
+                    "duration_s": 45,
+                    "purpose": "Rehearses smooth vocal register navigation up to the peak notes demanded by the track.",
+                    "mechanics": "Glide smoothly upward on a tall 'Ooo', morphing cleanly into 'Aaa' as you touch your ceiling note. Drop the jaw and lean into diaphragm support.",
+                    "song_context": f"Targets cords specifically to conquer the high climax notes of '{song_title}'."
+                },
+                {
+                    "step_num": 4,
+                    "title": "Mixed Voice Belt Release ('Mum ➔ May')",
+                    "category": "Cord Closure & Dynamic Recovery",
+                    "target_notes": f"{anchor} (Resonant Center)",
+                    "duration_s": 30,
+                    "purpose": "Stabilizes balanced thyroarytenoid / cricothyroid cord engagement to prevent post-belt fatigue.",
+                    "mechanics": "Execute sustained 3-note phrases on 'Mum... May...'. Feel effortless cord closure without raising your larynx or tightening your neck muscles.",
+                    "song_context": f"Ensures sustained stamina across all rehearsals of '{song_title}'."
+                }
+            ]
+        elif preset_key == "formant":
+            routine = [
+                {
+                    "step_num": 1,
+                    "title": "Forward Mask & Nasal Resonance Buzz ('Ming / Ring')",
+                    "category": "Acoustic Ring (2.8–3.4 kHz)",
+                    "target_notes": f"{sweet_min} ➔ {anchor}",
+                    "duration_s": 35,
+                    "purpose": "Places acoustic focus into the nasal bone and frontal mask for natural acoustic amplification.",
+                    "mechanics": "Sustain a resonant 'Ming-ng-ng' feeling intense vibration right between your eyes and across your bridge of nose. Do not push volume.",
+                    "song_context": f"Cuts through dense backing tracks in '{song_title}' without vocal strain."
+                },
+                {
+                    "step_num": 2,
+                    "title": "High Formant Twang Triads ('Kee-Kee-Kee')",
+                    "category": "Singer's Formant Spike",
+                    "target_notes": f"{anchor} ➔ {sweet_max}",
+                    "duration_s": 40,
+                    "purpose": "Spikes the 2.8–3.4 kHz frequency band where human hearing is sharpest.",
+                    "mechanics": "Sing short, energetic staccato bursts on 'Kee-Kee-Kee' up and down a triad. Keep each note crisp, pointed, and resonant.",
+                    "song_context": "Boosts your Formant Ratio metric into the 1.50+ Professional Singer tier."
+                },
+                {
+                    "step_num": 3,
+                    "title": "Wide Pharynx Vowel Morphing ('Ee ➔ Oh ➔ Ah')",
+                    "category": "Resonant Timbre Uniformity",
+                    "target_notes": f"{anchor} (5-Tone Scale)",
+                    "duration_s": 40,
+                    "purpose": "Preserves identical acoustic resonance while transitioning through changing vowels.",
+                    "mechanics": "Sing a descending 5-tone legato line changing vowels each repetition. Keep the pharynx spacious and open behind the soft palate.",
+                    "song_context": f"Polishes diction clarity and eliminates sibilance harshness in '{song_title}'."
+                },
+                {
+                    "step_num": 4,
+                    "title": "Dynamic Swell (Messa di Voce)",
+                    "category": "Subglottic Pressure Control",
+                    "target_notes": f"{anchor} (Sustained Sweet Spot)",
+                    "duration_s": 35,
+                    "purpose": "Masters gradual crescendo from pianissimo to forte and back without pitch drift.",
+                    "mechanics": "On your comfortable anchor note, sing softly (pp), gradually swell to full room resonance (f) over 4 counts, then smoothly diminish (pp).",
+                    "song_context": f"Maximizes your Energy Steadiness & Dynamic Control scores in '{song_title}'."
+                }
+            ]
+        elif preset_key == "tension":
+            routine = [
+                {
+                    "step_num": 1,
+                    "title": "Sigh Drop & Diaphragm Release",
+                    "category": "Laryngeal Decompression",
+                    "target_notes": f"{anchor} ➔ Floor",
+                    "duration_s": 30,
+                    "purpose": "Releases involuntary throat constriction and resets laryngeal baseline height.",
+                    "mechanics": "Take an open yawn-breath through mouth and nose, then gently let out a descending sigh from your chest to your lowest speaking rumble.",
+                    "song_context": "Resets throat muscles and releases pre-performance tension."
+                },
+                {
+                    "step_num": 2,
+                    "title": "Jaw & Tongue Root De-constriction ('Kah-Lah-Mah')",
+                    "category": "Articulatory Relaxation",
+                    "target_notes": f"{sweet_min} (Comfortable 3rds)",
+                    "duration_s": 35,
+                    "purpose": "Eliminates jaw locking and tongue root cramping during rapid lyric passages.",
+                    "mechanics": "Drop your jaw loose (two fingers vertical spacing). Sing 'Kah-Lah-Mah' allowing only the tongue tip and lips to move while the jaw remains still.",
+                    "song_context": f"Maintains crisp articulation across fast phrases in '{song_title}'."
+                },
+                {
+                    "step_num": 3,
+                    "title": "Soft Palate Yawn-Sigh ('Whoooo')",
+                    "category": "Pharyngeal Expansion",
+                    "target_notes": f"{sweet_max} ➔ {sweet_min}",
+                    "duration_s": 35,
+                    "purpose": "Lifts the soft palate to create internal dome space, eliminating nasal pinch.",
+                    "mechanics": "Inhale feeling cool air at the back of your throat. Sing a hollow, breath-supported 'Whooo' gliding downwards like an owl.",
+                    "song_context": "Removes nasal harshness and creates warm, rounded vocal acoustics."
+                },
+                {
+                    "step_num": 4,
+                    "title": "Gentle Chest Rumble & Cord Cool-Down ('Zzz / Vvv')",
+                    "category": "Vocal Cord Soothing",
+                    "target_notes": f"{sweet_min} (Floor Grounding)",
+                    "duration_s": 30,
+                    "purpose": "Massages vocal folds with micro-vibrations to clear fatigue and prevent vocal fry.",
+                    "mechanics": "Buzz loose lips on 'Vvv' or voiced 'Zzz' at your bottom comfortable pitch. Feel the warm vibrations massaging your lower chest.",
+                    "song_context": f"Leaves cords calm, supple, and energized for '{song_title}'."
+                }
+            ]
+        else: # Default 3-Minute Wakeup
+            routine = self.offline_coach._generate_rule_based_warmup(
+                p.to_dict() if p else None,
+                self.selected_track,
+                self.current_key_shift
+            )
+
+        self._warmup_routine = routine
+        self._warmup_step_idx = 0
+        self._display_warmup_step(0)
+        self.lbl_warmup_status.config(text=f"Loaded '{preset_key.upper()}' routine preset.", fg=COLOR_CYAN)
+
+    def _on_generate_ai_warmup(self):
+        if self._is_generating_warmup:
+            return
+
+        self._is_generating_warmup = True
+        self.btn_gen_warmup.config(state="disabled", text="⏳ Maestro Tiki is Composing Routine...")
+        self.lbl_warmup_status.config(
+            text="✨ Maestro Tiki (Offline Qwen LLM) is formulating progressive exercises tailored to your voice & song...",
+            fg=COLOR_GOLD
+        )
+
+        def _worker():
+            p_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
+            routine = self.offline_coach.generate_warmup_routine(
+                profile_data=p_dict,
+                track_info=self.selected_track,
+                key_shift=self.current_key_shift
+            )
+
+            def _done():
+                self._is_generating_warmup = False
+                self.btn_gen_warmup.config(state="normal", text="✨ Generate Song-Adaptive Routine (Offline AI)")
+                if routine and len(routine) >= 2:
+                    self._warmup_routine = routine
+                    self._warmup_step_idx = 0
+                    self._display_warmup_step(0)
+                    self.lbl_warmup_status.config(
+                        text="✅ Tailored offline warmup routine ready! Exercise 1 active.",
+                        fg=COLOR_LIME
+                    )
+                else:
+                    self.lbl_warmup_status.config(
+                        text="⚠️ Loaded pedagogical fallback routine.",
+                        fg=COLOR_GOLD
+                    )
+                    self._load_warmup_preset("3min")
+
+            self.root.after_idle(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _display_warmup_step(self, step_idx: int):
+        if not self._warmup_routine or not (0 <= step_idx < len(self._warmup_routine)):
+            return
+
+        self._warmup_step_idx = step_idx
+        step = self._warmup_routine[step_idx]
+
+        self.lbl_warmup_step_num.config(text=f"EXERCISE {step_idx + 1} OF {len(self._warmup_routine)}")
+        self.lbl_warmup_category.config(text=str(step.get("category", "VOCAL CONDITIONING")).upper())
+        self.lbl_warmup_title.config(text=str(step.get("title", f"Exercise {step_idx + 1}")))
+        self.lbl_warmup_target_notes.config(text=f"🎶 Target Notes: {step.get('target_notes', 'Comfort Sweet Spot')}")
+        self.lbl_warmup_song_context.config(text=f"🎵 Song Connection: {step.get('song_context', '')}")
+        self.lbl_warmup_purpose.config(text=f"🎯 Purpose: {step.get('purpose', '')}")
+        self.lbl_warmup_mechanics.config(text=f"🛠️ Mechanics: {step.get('mechanics', '')}")
+
+        # Button states
+        self.btn_warmup_prev.config(state="normal" if step_idx > 0 else "disabled")
+        self.btn_warmup_next.config(state="normal" if step_idx < len(self._warmup_routine) - 1 else "disabled")
+
+        # Reset timer for this step
+        self._reset_warmup_timer()
+
+        # Update canvas scrollregion
+        self.root.update_idletasks()
+        if hasattr(self, "calib_canvas"):
+            self.calib_canvas.configure(scrollregion=self.calib_canvas.bbox("all"))
+
+    def _toggle_warmup_timer(self):
+        if self._warmup_timer_running:
+            if self._warmup_timer_job:
+                self.root.after_cancel(self._warmup_timer_job)
+                self._warmup_timer_job = None
+            self._warmup_timer_running = False
+            self.btn_warmup_timer_toggle.config(text="▶ Resume Timer", bg=COLOR_CYAN, fg="#000000")
+        else:
+            if self._warmup_timer_seconds <= 0:
+                self._reset_warmup_timer()
+            self._warmup_timer_running = True
+            self.btn_warmup_timer_toggle.config(text="⏸ Pause", bg=COLOR_GOLD, fg="#000000")
+            self._warmup_timer_tick()
+
+    def _reset_warmup_timer(self):
+        if self._warmup_timer_job:
+            self.root.after_cancel(self._warmup_timer_job)
+            self._warmup_timer_job = None
+        self._warmup_timer_running = False
+
+        dur = 35
+        if self._warmup_routine and 0 <= self._warmup_step_idx < len(self._warmup_routine):
+            dur = int(self._warmup_routine[self._warmup_step_idx].get("duration_s", 35))
+
+        self._warmup_timer_seconds = dur
+        m = dur // 60
+        s = dur % 60
+        self.lbl_warmup_timer.config(text=f"{m:02d}:{s:02d}", fg=COLOR_CYAN)
+        self.btn_warmup_timer_toggle.config(text="▶ Start Timer", state="normal", bg=COLOR_CYAN, fg="#000000")
+
+    def _warmup_timer_tick(self):
+        if not self._warmup_timer_running:
+            return
+
+        if self._warmup_timer_seconds > 0:
+            self._warmup_timer_seconds -= 1
+            m = self._warmup_timer_seconds // 60
+            s = self._warmup_timer_seconds % 60
+            color = COLOR_CYAN if self._warmup_timer_seconds > 5 else COLOR_GOLD
+            self.lbl_warmup_timer.config(text=f"{m:02d}:{s:02d}", fg=color)
+            self._warmup_timer_job = self.root.after(1000, self._warmup_timer_tick)
+        else:
+            self._warmup_timer_running = False
+            self.lbl_warmup_timer.config(text="00:00", fg=COLOR_LIME)
+            self.btn_warmup_timer_toggle.config(
+                text="✓ Step Complete!",
+                state="disabled",
+                bg="#1b3d2b",
+                fg=COLOR_LIME
+            )
+
+    def _prev_warmup_step(self):
+        if self._warmup_step_idx > 0:
+            self._display_warmup_step(self._warmup_step_idx - 1)
+
+    def _next_warmup_step(self):
+        if self._warmup_step_idx < len(self._warmup_routine) - 1:
+            self._display_warmup_step(self._warmup_step_idx + 1)
+
     def _on_close(self):
+        if hasattr(self, "_warmup_timer_job") and self._warmup_timer_job:
+            self.root.after_cancel(self._warmup_timer_job)
+            self._warmup_timer_job = None
         self.player.stop()
         self.recorder.stop_recording()
         self.root.destroy()

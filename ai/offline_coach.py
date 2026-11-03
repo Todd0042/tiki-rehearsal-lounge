@@ -363,3 +363,154 @@ class OfflineVocalCoach:
             )
 
         return "\n".join(lines)
+
+    def generate_warmup_routine(
+        self,
+        profile_data: Optional[Dict[str, Any]] = None,
+        track_info: Optional[Dict[str, Any]] = None,
+        key_shift: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Generates an adaptive, multi-step vocal warmup routine tailored to:
+        - Singer's calibrated tessitura (vocal type, power sweet spot)
+        - Target song melody peaks and recommended key shift
+        """
+        if not self.load_engine():
+            return self._generate_rule_based_warmup(profile_data, track_info, key_shift)
+
+        prompt = self._build_warmup_prompt(profile_data, track_info, key_shift)
+
+        try:
+            output = self._llm(
+                prompt,
+                max_tokens=650,
+                temperature=0.6,
+                top_p=0.9,
+                stop=["<|im_end|>", "<|endoftext|>"]
+            )
+            text = output["choices"][0]["text"].strip()
+            parsed = self._parse_warmup_json(text)
+            if parsed and len(parsed) >= 2:
+                return parsed
+            return self._generate_rule_based_warmup(profile_data, track_info, key_shift)
+        except Exception as e:
+            print(f"[OfflineVocalCoach] Warmup generation error: {e}", file=sys.stderr)
+            return self._generate_rule_based_warmup(profile_data, track_info, key_shift)
+
+    def _build_warmup_prompt(
+        self,
+        profile: Optional[Dict[str, Any]],
+        track_info: Optional[Dict[str, Any]],
+        key_shift: int
+    ) -> str:
+        song_title = track_info.get("title", "Selected Rehearsal Song") if track_info else "Selected Rehearsal Song"
+        artist = track_info.get("artist", "") if track_info else ""
+        vocal_type = profile.get("vocal_type", "Contemporary Vocalist") if profile else "Contemporary Vocalist"
+        sweet_min = profile.get("tessitura_min_note", "C3") if profile else "C3"
+        sweet_max = profile.get("tessitura_max_note", "G4") if profile else "G4"
+        anchor = profile.get("anchor_note", "F3") if profile else "F3"
+
+        prompt = (
+            f"<|im_start|>system\n"
+            f"You are Maestro Tiki, an expert Polynesian studio vocal coach. Design a personalized 4-step progressive vocal warmup routine.\n"
+            f"Return ONLY a valid JSON list of 4 exercise objects with keys:\n"
+            f'["title", "category", "target_notes", "duration_s", "purpose", "mechanics", "song_context"]\n'
+            f"No markdown formatting, no commentary, only the raw JSON array.<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Singer Profile: {vocal_type}, Speaking Anchor: {anchor}, Comfort Sweet Spot: {sweet_min} to {sweet_max}.\n"
+            f"Upcoming Song: '{song_title}' {f'by {artist}' if artist else ''} at key shift {key_shift:+d} semitones.\n"
+            f"Create 4 progressive warmups that unlock diaphragmatic breath, Singer's Formant ring (2.8–3.4 kHz), and extend upper range safely up to the song climax.<|im_end|>\n"
+            f"<|im_start|>assistant\n["
+        )
+        return prompt
+
+    def _parse_warmup_json(self, text: str) -> Optional[List[Dict[str, Any]]]:
+        try:
+            cleaned = text.strip()
+            if not cleaned.startswith("["):
+                cleaned = "[" + cleaned
+            if not cleaned.endswith("]"):
+                last_brace = cleaned.rfind("}")
+                if last_brace != -1:
+                    cleaned = cleaned[:last_brace + 1] + "]"
+                else:
+                    return None
+            data = json.loads(cleaned)
+            if isinstance(data, list) and len(data) >= 2:
+                for idx, item in enumerate(data, 1):
+                    item.setdefault("step_num", idx)
+                    # Clamp exercise duration to a realistic pedagogical range (25s - 60s)
+                    try:
+                        raw_dur = int(item.get("duration_s", 35))
+                        item["duration_s"] = max(25, min(60, raw_dur if raw_dur >= 15 else 35))
+                    except (ValueError, TypeError):
+                        item["duration_s"] = 35
+
+                    tn = item.get("target_notes")
+                    if isinstance(tn, list):
+                        item["target_notes"] = " ➔ ".join(str(n) for n in tn)
+                    elif not tn:
+                        item["target_notes"] = "Comfortable Tessitura"
+
+                    if not item.get("song_context"):
+                        item["song_context"] = "Targeted cord and breath conditioning for your upcoming rehearsal."
+                return data
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _generate_rule_based_warmup(
+        profile: Optional[Dict[str, Any]],
+        track_info: Optional[Dict[str, Any]],
+        key_shift: int
+    ) -> List[Dict[str, Any]]:
+        """Pedagogical fallback generator incorporating singer range, track, and key shift."""
+        song_title = track_info.get("title", "Your Rehearsal Song") if track_info else "Your Rehearsal Song"
+        vocal_type = profile.get("vocal_type", "Contemporary Vocalist") if profile else "Calibrated Vocalist"
+        sweet_min = profile.get("tessitura_min_note", "C3") if profile else "C3"
+        sweet_max = profile.get("tessitura_max_note", "G4") if profile else "G4"
+        anchor = profile.get("anchor_note", "E3") if profile else "E3"
+
+        return [
+            {
+                "step_num": 1,
+                "title": "Diaphragmatic Breath & Lip Trill Glide",
+                "category": "Breath & Core Phonation",
+                "target_notes": f"{sweet_min} ➔ {anchor} ➔ {sweet_min}",
+                "duration_s": 35,
+                "purpose": "Awakens vocal cords without friction while establishing subglottic air pressure.",
+                "mechanics": "Expand your lower ribcage like an umbrella. Blow relaxed, steady air through loose fluttering lips on a gentle 5-tone descending glide. Zero throat squeeze.",
+                "song_context": f"Calibrates breath support to sustain clean line ends in '{song_title}'."
+            },
+            {
+                "step_num": 2,
+                "title": "Singer's Formant Ring & Forward Mask ('Nay / Mum')",
+                "category": "Acoustic Resonance (2.8–3.4 kHz)",
+                "target_notes": f"{anchor} ➔ {sweet_max}",
+                "duration_s": 40,
+                "purpose": "Focuses acoustic projection into the facial mask and hard palate to pierce through backing stems.",
+                "mechanics": "Sing a brassy, twangy 'Nay-nay-nay' with a lifted soft palate and relaxed jaw. Feel the vibrations buzzing right behind your upper front teeth.",
+                "song_context": f"Activates the piercing acoustic cut needed for the melody in '{song_title}'."
+            },
+            {
+                "step_num": 3,
+                "title": "Upper Tessitura Climax Sirens ('Ooo ➔ Aaa')",
+                "category": "Range Extension & High Belts",
+                "target_notes": f"{sweet_min} ➔ {sweet_max} (Climax Prep)",
+                "duration_s": 45,
+                "purpose": "Smooths vocal register transitions and prepares cords for the track's highest belted climax.",
+                "mechanics": "Start in rich chest voice on 'Ooo' and siren upward smoothly toward your power ceiling, opening the vowel to 'Aaa' as you ascend. Anchor support from your lower abdomen.",
+                "song_context": f"Prepares your cords to hit the highest melody notes of '{song_title}' (Key shift: {key_shift:+d})."
+            },
+            {
+                "step_num": 4,
+                "title": "Vowel Cascade & Pitch Centering ('Wah-Oh-Ah')",
+                "category": "Intonation & Diction",
+                "target_notes": f"{anchor} (Sustained Center)",
+                "duration_s": 30,
+                "purpose": "Locks in intonation stability and releases tongue/jaw tension across vowel shifts.",
+                "mechanics": "Hold your comfortable anchor note while smoothly morphing vowels 'Wah... Oh... Ah'. Keep pitch centered within ±10 cents without allowing line-end droop.",
+                "song_context": "Stabilizes pitch precision for the verse-to-chorus dynamic transitions."
+            }
+        ]
