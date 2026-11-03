@@ -58,9 +58,12 @@ class TikiDatabaseBridge:
                     "sing_along_tracks": sing_alongs,
                     "local_ready_tracks": local_ready,
                 }
-        except Exception as e:
-            print(f"[DB Bridge] Failed to fetch stats: {e}")
+        except Exception:
             return {"total_tracks": 0, "sing_along_tracks": 0, "local_ready_tracks": 0}
+
+    def get_library_stats(self) -> Dict[str, int]:
+        """Alias for get_stats()."""
+        return self.get_stats()
 
     def search_tracks(
         self,
