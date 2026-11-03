@@ -1,3 +1,11 @@
+<p align="center">
+  <a href="https://ko-fi.com/todd0042">
+    <img src="https://raw.githubusercontent.com/Todd0042/creator-assets/main/banners/todd_creator_banner_v1.0.png" alt="Support Todd on Ko-fi" width="100%" />
+  </a>
+</p>
+
+---
+
 # 🌺 Tiki Rehearsal Lounge (Vocal Coach & Studio)
 
 [![Version](https://img.shields.io/badge/Version-1.0.5-ff007f.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
@@ -369,3 +377,12 @@ The compiled package will be placed at `dist/TikiRehearsalLounge-v1.0.0-x86_64.A
     <img src="https://img.shields.io/badge/☕_Support_Tiki_Projects_on_Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
   </a>
 </p>
+
+---
+
+<p align="center">
+  <a href="https://ko-fi.com/todd0042">
+    <img src="https://raw.githubusercontent.com/Todd0042/creator-assets/main/banners/todd_creator_banner_v2.0.png" alt="Support Todd on Ko-fi" width="100%" />
+  </a>
+</p>
+
