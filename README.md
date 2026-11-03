@@ -1,10 +1,10 @@
 # 🌺 Tiki Rehearsal Lounge (Vocal Coach & Studio)
 
-[![Version](https://img.shields.io/badge/Version-1.0.0-ff007f.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.5-ff007f.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-00f0ff.svg)](LICENSE)
-[![Platform: Linux AppImage](https://img.shields.io/badge/Platform-Linux%20(AppImage)%20%7C%20Python-orange.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
+[![Platform: Linux & Windows](https://img.shields.io/badge/Platform-Linux%20(AppImage)%20%7C%20Windows-orange.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-39ff14.svg)]()
-[![Tests: 24 Passed](https://img.shields.io/badge/Tests-24%20Passing-brightgreen.svg)]()
+[![Tests: 30 Passed](https://img.shields.io/badge/Tests-30%20Passing-brightgreen.svg)]()
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Creator-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/todd0042)
 
 > **Your personal vocal gym, pitch calibration laboratory, and post-take performance report card studio — companion to Tiki Karaoke or 100% standalone.**
@@ -18,15 +18,15 @@
   * [🎤 3 Steps to Vocal Mastery (Calibrate, Warmup, Rehearse)](#-3-steps-to-vocal-mastery)
   * [📸 Visual Tour & Studio Cockpit](#-visual-tour--studio-cockpit)
   * [✨ Feature Highlights at a Glance](#-feature-highlights-at-a-glance)
-  * [🚀 Quick Download & Installation (Linux AppImage & Source)](#-quick-download--installation)
+  * [🚀 Quick Download & Installation (Linux AppImage & Windows Setup)](#-quick-download--installation)
 * **Part 2 — Technical Architecture & Scientific DSP Reference**
   * [1. Dual-Architecture & Integration (Standalone vs. Tiki Karaoke Companion)](#1-dual-architecture--integration)
   * [2. Vocal Diagnostic Calibration Engine (Siren Glides & Speaking Fundamental $F_0$)](#2-vocal-diagnostic-calibration-engine)
   * [3. Smart Key Recommendation Engine ($[-3, +3]$ Semitone Range)](#3-smart-key-recommendation-engine)
-  * [4. Multi-Metric Performance Take Analysis (Pitch %, Intonation Cents, Rhythm Pocket, Vibrato)](#4-multi-metric-performance-take-analysis)
-  * [5. 100% Offline Rule-Based Vocal Coach (`ai/offline_coach.py`)](#5-100-offline-vocal-coach)
+  * [4. Multi-Metric Performance Take Analysis & Bleed Suppression](#4-multi-metric-performance-take-analysis)
+  * [5. 100% Offline AI Vocal Coach (`ai/offline_coach.py`)](#5-100-offline-vocal-coach)
   * [6. Multi-Instrument Procedural Tone Synthesizer & Warmup Patterns](#6-multi-instrument-procedural-tone-synthesizer)
-  * [7. SQLite Database Schema, FTS5 Fast Search & Metadata Editing](#7-sqlite-database-schema-fts5-search--metadata-editing)
+  * [7. SQLite Database Schema & Vocal Progression Tracking (`rehearsal_history.db`)](#7-sqlite-database-schema-fts5-search--metadata-editing)
   * [8. Downloader, LUFS Normalization & File Relocation](#8-downloader-lufs-normalization--file-relocation)
   * [9. Configuration Schema (`config.json`) & CLI Options](#9-configuration-schema--cli-options)
   * [10. Automated Verification Suite & Building the AppImage](#10-automated-verification-suite--building-the-appimage)
@@ -43,8 +43,8 @@
 1. **🔬 Scientific Pitch & Vocal Range Calibration**: Unlocks your true vocal range ($F_{0,\text{min}}$ to $F_{0,\text{max}}$) and calculates your **Power Tessitura Zone** ($+3$ to $+14$ semitones above speaking fundamental).
 2. **🎹 Guided Warmup Studio**: Procedural multi-instrument reference tones (Piano, Rhodes, Strings, Flute, Guitar, Brass) with real-time pitch feedback to prepare your vocal folds safely.
 3. **🎵 Formant-Preserving Key Shifting**: Rehearse tracks with real-time `librubberband` key transposition without pitch chipmunking or tempo distortion.
-4. **📊 Post-Take Report Cards**: Instant breakdown of pitch accuracy %, flat/sharp intonation drift in cents, millisecond rhythm onset timing, and natural vibrato modulation.
-5. **🧠 100% Offline Vocal Coach**: Provides actionable pedagogical physical adjustments ("drop the jaw", "expand lower ribcage") and timestamped phrase feedback with zero telemetry, zero cloud calls, and zero external subscriptions.
+4. **📊 Post-Take Report Cards with Audio Bleed Cancellation**: Instant breakdown of pitch accuracy %, flat/sharp intonation drift in cents, millisecond rhythm onset timing, and natural vibrato modulation—with reference audio subtraction to prevent false high scores on silent speaker bleed.
+5. **🧠 100% Offline AI Vocal Coach & Progression Tracker**: Powered by a bundled standalone `llama.cpp` engine running local open-weights models (Qwen 2.5 1.5B or 3B) on CPU. Tracks take-over-take growth in an isolated rolling database (`rehearsal_history.db`) with zero telemetry, zero cloud calls, and zero external subscriptions.
 
 ---
 
@@ -83,7 +83,8 @@ The desktop interface is rendered in Tiki's signature `#0d0814` midnight violet 
 * **🤝 One-Click Tiki Karaoke Integration**: If Tiki Karaoke is present on the machine, Rehearsal Lounge automatically discovers the shared `karaoke.db` and can be launched directly from Tiki Karaoke's Desktop Control Hub.
 * **⚙️ In-App Settings Dialog**: Change storage architecture (`integrated` vs `standalone`), select library/database/recordings directories with native OS browse dialogs, and configure target loudness (-16.0 or -23.0 LUFS).
 * **🎚️ Safe Key Transposition ($[-3, +3]$)**: Automatically analyzes melodic ceiling demands against your physiological tessitura to calculate optimal key changes without audio degradation.
-* **✏️ Track Metadata Sanitation**: Directly edit Artist, Title, Original Title, and Song Type (Karaoke vs. Sing-Along) with automatic file relocation between `tracks/` and `sing_along/`.
+* **🔇 Acoustic Bleed Cancellation**: Cross-correlates mic audio against backing track audio to discard matching speaker bleed at ambient noise levels, preventing false 90%+ scores when remaining silent.
+* **📈 Rolling Progression Database**: Stores take-over-take performance data in an isolated, auto-pruned `rehearsal_history.db` to deliver growth trajectory summaries without database bloat.
 * **🔒 100% Private & Offline**: Zero telemetry, zero cloud accounts, and zero internet connectivity needed to rehearse, calibrate, or run the vocal coach.
 
 ---
@@ -91,17 +92,17 @@ The desktop interface is rendered in Tiki's signature `#0d0814` midnight violet 
 ## 🚀 Quick Download & Installation
 
 ### Option A: Universal Linux AppImage
-1. Download **`TikiRehearsalLounge-v1.0.0-x86_64.AppImage`** from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge) (`rehearsal-linux` channel).
+1. Download **`TikiRehearsalLounge-v1.0.5-x86_64.AppImage`** from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge) (`rehearsal-linux` channel).
 2. Make it executable and run:
    ```bash
-   chmod +x TikiRehearsalLounge-v1.0.0-x86_64.AppImage
-   ./TikiRehearsalLounge-v1.0.0-x86_64.AppImage
+   chmod +x TikiRehearsalLounge-v1.0.5-x86_64.AppImage
+   ./TikiRehearsalLounge-v1.0.5-x86_64.AppImage
    ```
 
 ### Option B: Windows 10 & 11 (64-Bit)
 Download from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge):
-* **Turnkey Installer**: Run **`TikiRehearsalLoungeSetup-v1.0.0.exe`** (channel: `rehearsal-windows`) for Start Menu and Desktop shortcuts.
-* **Portable ZIP**: Extract **`TikiRehearsalLounge-Windows-v1.0.0-Portable.zip`** (channel: `rehearsal-windows-portable`) and launch `TikiRehearsalLounge.exe` (no administrator privileges required).
+* **Turnkey Installer**: Run **`TikiRehearsalLoungeSetup-v1.0.5.exe`** (channel: `rehearsal-windows`) for Start Menu and Desktop shortcuts.
+* **Portable ZIP**: Extract **`TikiRehearsalLounge-Windows-v1.0.5.zip`** (channel: `rehearsal-windows-portable`) and launch `TikiRehearsalLounge.exe` (no administrator privileges required).
 
 ### Option C: Running from Source (Linux & Cross-Platform)
 
@@ -212,16 +213,31 @@ Upon finishing a recorded take, the vocal stem is evaluated against four objecti
 
 ---
 
-## 5. 100% Offline Vocal Coach
+## 5. 100% Offline AI Vocal Coach
 
 The built-in vocal coach (`ai/offline_coach.py`) operates under two complementary modes:
 
-1. **Pedagogical Rule-Based Diagnostic (Default)**:
+1. **Pedagogical Rule-Based Diagnostic (Built-In Fallback)**:
    * Instant, deterministic feedback engine synthesizing scores, breath stability %, and timestamped phrase moments (e.g., *"[0:32] G4: Vocal pushed sharp on belting vowel"*).
    * Generates targeted physical adjustments (*"Drop jaw and lift soft palate before ascending"*).
-2. **Local GGUF LLM Execution (Optional)**:
-   * Supports local on-device small language models (e.g., Qwen 2.5 1.5B / Llama 3.2 1B GGUF) via `llama-cpp-python`.
-   * Never transmits audio or user data outside your local workstation.
+2. **Bundled Standalone `llama.cpp` Engine (`llama-server`)**:
+   * Pre-compiled zero-dependency C++ inference server packaged directly inside the app bundle alongside `mpv` and `ffmpeg`.
+   * Automatically manages a local loopback server (`http://127.0.0.1:<port>`) on an ephemeral port—requiring **zero Python compiler, MSVC, or pip installations**.
+   * Downloads verified open-weights models chunk-by-chunk via **Settings (⚙️) -> Offline AI Vocal Coach**:
+     * **Qwen2.5-1.5B-Instruct (Q4_K_M)**: ~986 MB, ~60–80 tok/s on CPU (ultra-fast compact option).
+     * **Qwen2.5-3B-Instruct (Q4_K_M)**: ~1.95 GB, ~25–45 tok/s on CPU (deep vocal pedagogy & nuanced feedback).
+   * Supports interactive back-and-forth chat in the Studio Cockpit with conversational context and boundary validation.
+   * Delivers an automated **📈 Vocal Progression & Growth Trajectory** summary at the bottom of every debriefing report by reading historical performance deltas from `rehearsal_history.db`.
+   * Never transmits audio or user data outside your local machine.
+
+---
+
+## 5.1 Rolling Progression Database (`rehearsal_history.db`)
+
+Historical performance metrics are stored in a dedicated, isolated SQLite database (`STUDIO_CONFIG_DIR / "data" / "rehearsal_history.db"`), completely segregated from the main `karaoke.db`:
+* **Automatic Rolling Window**: Automatically prunes records to enforce a maximum of **15 takes per song** and **100 takes studio-wide**, keeping prompt token overhead under 200 tokens.
+* **Delta Tracking**: Calculates take-over-take variance in overall score, pitch accuracy %, intonation cents drift, and diaphragmatic breath support.
+* **Management & Reset**: Integrated statistics card and full history clearing controls available in the in-app Settings dialog.
 
 ---
 
