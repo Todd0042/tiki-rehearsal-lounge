@@ -90,16 +90,20 @@ The desktop interface is rendered in Tiki's signature `#0d0814` midnight violet 
 
 ## 🚀 Quick Download & Installation
 
-### Option A: Universal Linux AppImage (Recommended)
-
-1. Download the latest **`TikiRehearsalLounge-v1.0.0-x86_64.AppImage`** from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases).
+### Option A: Universal Linux AppImage
+1. Download **`TikiRehearsalLounge-v1.0.0-x86_64.AppImage`** from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge) (`rehearsal-linux` channel).
 2. Make it executable and run:
    ```bash
    chmod +x TikiRehearsalLounge-v1.0.0-x86_64.AppImage
    ./TikiRehearsalLounge-v1.0.0-x86_64.AppImage
    ```
 
-### Option B: Running from Source (Linux & Cross-Platform)
+### Option B: Windows 10 & 11 (64-Bit)
+Download from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge):
+* **Turnkey Installer**: Run **`TikiRehearsalLoungeSetup-v1.0.0.exe`** (channel: `rehearsal-windows`) for Start Menu and Desktop shortcuts.
+* **Portable ZIP**: Extract **`TikiRehearsalLounge-Windows-v1.0.0-Portable.zip`** (channel: `rehearsal-windows-portable`) and launch `TikiRehearsalLounge.exe` (no administrator privileges required).
+
+### Option C: Running from Source (Linux & Cross-Platform)
 
 #### 1. System Prerequisites
 Ensure Python 3.10+, `mpv`, `ffmpeg`, and `tk` (Tkinter) are installed:
