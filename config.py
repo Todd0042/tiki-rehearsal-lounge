@@ -61,6 +61,7 @@ def load_tiki_karaoke_config() -> Dict[str, Any]:
         "library_dir": str(default_base),
         "recordings_dir": str(default_base / "performance_recordings"),
         "target_lufs": -16.0,
+        "video_quality_profile": "pro",
     }
 
 
@@ -71,6 +72,7 @@ TIKI_DATA_DIR = Path(TIKI_CONFIG.get("data_dir", str(HOME_DIR / "Music" / "Karao
 TIKI_LIBRARY_DIR = Path(TIKI_CONFIG.get("library_dir", str(HOME_DIR / "Music" / "Karaoke" / "Tiki")))
 TIKI_RECORDINGS_DIR = Path(TIKI_CONFIG.get("recordings_dir", str(TIKI_LIBRARY_DIR / "performance_recordings")))
 TIKI_TARGET_LUFS = float(TIKI_CONFIG.get("target_lufs", -16.0))
+TIKI_VIDEO_QUALITY_PROFILE = str(TIKI_CONFIG.get("video_quality_profile", "pro"))
 
 TIKI_DB_PATH = TIKI_DATA_DIR / "karaoke.db"
 

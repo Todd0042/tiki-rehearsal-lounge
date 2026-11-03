@@ -43,7 +43,9 @@ from config import (
     COLOR_DANGER,
     STUDIO_VERSION,
     TEMP_TAKES_DIR,
-    TIKI_RECORDINGS_DIR
+    TIKI_RECORDINGS_DIR,
+    TIKI_VIDEO_QUALITY_PROFILE,
+    TIKI_TARGET_LUFS
 )
 from db.bridge import TikiDatabaseBridge
 from audio.recorder import AudioRecorder
@@ -125,6 +127,8 @@ class StudioCockpitWindow:
         self._song_peaks: Optional[Dict[str, Any]] = None
         self._recommended_key_shift: int = 0
         self.current_key_shift: int = 0
+        self._yt_search_results: Dict[str, Dict[str, Any]] = {}
+        self._downloading_tracks: set[str] = set()
         self.current_take_wav: Optional[Path] = None
         self.is_rehearsing: bool = False
         self.is_calibrating: bool = False
@@ -1026,7 +1030,7 @@ class StudioCockpitWindow:
         )
         btn_yt.pack(side="left")
 
-        # Quick Filter Chips Bar
+        # Quick Filter Chips Bar with Video Quality Selector
         filter_bar = tk.Frame(parent, bg=COLOR_BG_MAIN, padx=12, pady=4)
         filter_bar.pack(fill="x", pady=(2, 6))
 
@@ -1063,6 +1067,41 @@ class StudioCockpitWindow:
             btn.pack(side="left", padx=3)
             self._filter_buttons[f_key] = btn
 
+        # Video Quality Profile Selector (Defaulted from Tiki Karaoke config)
+        q_frame = tk.Frame(filter_bar, bg=COLOR_BG_MAIN)
+        q_frame.pack(side="right")
+
+        tk.Label(
+            q_frame,
+            text="QUALITY:",
+            font=("Helvetica", 8, "bold"),
+            fg=COLOR_GOLD,
+            bg=COLOR_BG_MAIN
+        ).pack(side="left", padx=(0, 4))
+
+        self.quality_var = tk.StringVar()
+        cfg_q = TIKI_VIDEO_QUALITY_PROFILE.lower()
+        if "720" in cfg_q:
+            default_q = "Balanced 720p HD"
+        elif "480" in cfg_q or "sd" in cfg_q or "compact" in cfg_q:
+            default_q = "Compact 480p SD"
+        else:
+            default_q = "Pro 1080p Full HD (Tiki Config)"
+
+        self.quality_var.set(default_q)
+        self.cbo_quality = ttk.Combobox(
+            q_frame,
+            textvariable=self.quality_var,
+            values=[
+                "Pro 1080p Full HD (Tiki Config)",
+                "Balanced 720p HD",
+                "Compact 480p SD"
+            ],
+            state="readonly",
+            width=26
+        )
+        self.cbo_quality.pack(side="left")
+
         # Results Table
         table_frame = tk.Frame(parent, bg=COLOR_BG_MAIN)
         table_frame.pack(fill="both", expand=True, padx=12, pady=4)
@@ -1096,7 +1135,7 @@ class StudioCockpitWindow:
 
         self.tree_tracks.bind("<Double-1>", lambda e: self._on_select_track())
 
-        # Select Button Bar
+        # Select & Download Button Bar
         btn_bar = tk.Frame(parent, bg=COLOR_BG_MAIN)
         btn_bar.pack(fill="x", padx=12, pady=(4, 12))
 
@@ -1112,6 +1151,22 @@ class StudioCockpitWindow:
             command=self._on_select_track
         )
         btn_select.pack(side="right")
+
+        self.btn_download_track = tk.Button(
+            btn_bar,
+            text="⬇️ Download to Library",
+            bg="#2a1240",
+            fg=COLOR_MAGENTA,
+            activebackground="#45186b",
+            activeforeground="#ffffff",
+            font=("Helvetica", 10, "bold"),
+            bd=1,
+            relief="solid",
+            padx=14,
+            pady=8,
+            command=self._on_download_selected_track
+        )
+        self.btn_download_track.pack(side="right", padx=(0, 8))
 
         # Initial populate
         self.root.after_idle(self._on_search_library)
@@ -2354,24 +2409,27 @@ class StudioCockpitWindow:
                 tags=(row_tag,)
             )
 
-    def _on_select_track(self):
-        selected = self.tree_tracks.selection()
-        if not selected:
-            return
-        item_vals = self.tree_tracks.item(selected[0], "values")
-        track_id = int(item_vals[0])
+    def _get_selected_quality_profile(self) -> str:
+        """Determines the active video quality profile string."""
+        val = getattr(self, "quality_var", None)
+        if not val:
+            return TIKI_VIDEO_QUALITY_PROFILE
+        txt = val.get().lower()
+        if "480" in txt or "compact" in txt or "sd" in txt:
+            return "compact_480p"
+        if "720" in txt or "balanced" in txt:
+            return "balanced_720p"
+        return "pro"
 
-        track = self.db.get_track_by_id(track_id)
-        if not track:
-            return
-
+    def _load_track_into_cockpit(self, track: Dict[str, Any]):
+        """Loads a ready track into the rehearsal cockpit with full melody and key sync."""
         self.selected_track = track
         self._song_peaks = None
         self._recommended_key_shift = 0
         self.lbl_track_title.config(text=track.get("title", "Unknown Title"))
         self.lbl_track_artist.config(text=track.get("artist", "Unknown Artist"))
-        dur_min = track.get("duration", 0) // 60
-        dur_sec = track.get("duration", 0) % 60
+        dur_min = int(track.get("duration", 0)) // 60
+        dur_sec = int(track.get("duration", 0)) % 60
         self.lbl_track_meta.config(
             text=f"Duration: {dur_min}:{dur_sec:02d}  •  Source: {track.get('media_source', 'local').upper()}"
         )
@@ -2399,6 +2457,158 @@ class StudioCockpitWindow:
                     self.dispatch_to_main(_ui)
             threading.Thread(target=_scan_worker, daemon=True).start()
 
+    def _on_select_track(self):
+        """Triggered on Double-Click or 'Load Selected Song into Cockpit' button."""
+        selected = self.tree_tracks.selection()
+        if not selected:
+            return
+        item_id = selected[0]
+        item_vals = self.tree_tracks.item(item_id, "values")
+        raw_id = item_vals[0]
+
+        if str(raw_id).upper() == "YT":
+            # Un-downloaded YouTube search result: start download, then auto-load into cockpit!
+            vid = item_id.replace("yt_", "") if item_id.startswith("yt_") else ""
+            if not vid:
+                for v_key, r in self._yt_search_results.items():
+                    if r.get("title") == item_vals[1] and r.get("artist") == item_vals[2]:
+                        vid = v_key
+                        break
+            if vid:
+                self._start_track_download(vid, item_id, auto_load=True)
+            return
+
+        # It's an integer track ID in the database
+        try:
+            track_id = int(raw_id)
+        except (ValueError, TypeError):
+            return
+
+        track = self.db.get_track_by_id(track_id)
+        if not track:
+            return
+
+        local_path = track.get("local_path")
+        if not track.get("is_downloaded") or not local_path or not Path(local_path).exists():
+            vid = track.get("video_id")
+            if vid:
+                self._start_track_download(vid, item_id, auto_load=True, existing_track=track)
+                return
+            else:
+                messagebox.showwarning("File Missing", f"Local file not found for '{track.get('title')}'.")
+                return
+
+        self._load_track_into_cockpit(track)
+
+    def _on_download_selected_track(self):
+        """Explicit '⬇️ Download to Library' button handler."""
+        selected = self.tree_tracks.selection()
+        if not selected:
+            messagebox.showinfo("Select Song", "Please select a song from the library or search results to download.")
+            return
+        item_id = selected[0]
+        item_vals = self.tree_tracks.item(item_id, "values")
+        raw_id = item_vals[0]
+
+        if str(raw_id).upper() == "YT":
+            vid = item_id.replace("yt_", "") if item_id.startswith("yt_") else ""
+            if not vid:
+                for v_key, r in self._yt_search_results.items():
+                    if r.get("title") == item_vals[1] and r.get("artist") == item_vals[2]:
+                        vid = v_key
+                        break
+            if vid:
+                self._start_track_download(vid, item_id, auto_load=True)
+        else:
+            try:
+                track_id = int(raw_id)
+                track = self.db.get_track_by_id(track_id)
+                if track:
+                    local_path = track.get("local_path")
+                    if track.get("is_downloaded") and local_path and Path(local_path).exists():
+                        messagebox.showinfo("Already Downloaded", f"'{track.get('title')}' is already downloaded and offline-ready.")
+                        return
+                    vid = track.get("video_id")
+                    if vid:
+                        self._start_track_download(vid, item_id, auto_load=True, existing_track=track)
+            except Exception:
+                pass
+
+    def _start_track_download(
+        self,
+        video_id: str,
+        item_id: str,
+        auto_load: bool = True,
+        existing_track: Optional[Dict[str, Any]] = None
+    ):
+        """Asynchronously downloads YouTube track with full Tiki Karaoke backend parity."""
+        if video_id in self._downloading_tracks:
+            messagebox.showinfo("In Progress", "This track is already downloading.")
+            return
+
+        self._downloading_tracks.add(video_id)
+
+        # Retrieve metadata
+        if existing_track:
+            meta_src = existing_track
+        else:
+            meta_src = self._yt_search_results.get(video_id, {})
+
+        title = meta_src.get("title", "Song")
+        artist = meta_src.get("artist", "Artist")
+        original_title = meta_src.get("original_title", "")
+        duration = int(meta_src.get("duration", 0))
+        is_sing_along = bool(meta_src.get("is_sing_along", False))
+        channel = meta_src.get("channel", "")
+
+        quality_prof = self._get_selected_quality_profile()
+
+        def _progress(fraction: float, stage_text: str):
+            def _ui():
+                pct = int(fraction * 100)
+                self.lbl_status.config(text=f"⬇️ {stage_text} [{title[:28]}]", fg=COLOR_GOLD)
+                if self.tree_tracks.exists(item_id):
+                    self.tree_tracks.set(item_id, "downloaded", f"⏳ {pct}%")
+            self.dispatch_to_main(_ui)
+
+        def _worker():
+            meta = self.downloader.download_track(
+                video_id=video_id,
+                title=title,
+                artist=artist,
+                original_title=original_title,
+                channel=channel,
+                duration=duration,
+                is_sing_along=is_sing_along,
+                quality_profile=quality_prof,
+                progress_callback=_progress
+            )
+
+            self._downloading_tracks.discard(video_id)
+
+            def _done():
+                if meta and meta.get("id"):
+                    if self.tree_tracks.exists(item_id):
+                        self.tree_tracks.set(item_id, "id", str(meta["id"]))
+                        self.tree_tracks.set(item_id, "downloaded", "✅ Ready (Offline)")
+                    self.lbl_status.config(
+                        text=f"✅ Downloaded & EBU R128 normalized '{title}' (-{TIKI_TARGET_LUFS} LUFS). Ready for rehearsal!",
+                        fg=COLOR_LIME
+                    )
+                    if auto_load:
+                        self._load_track_into_cockpit(meta)
+                else:
+                    if self.tree_tracks.exists(item_id):
+                        self.tree_tracks.set(item_id, "downloaded", "❌ Failed")
+                    self.lbl_status.config(
+                        text=f"❌ Download failed for '{title}'. Check network connection or video availability.",
+                        fg=COLOR_DANGER
+                    )
+
+            self.dispatch_to_main(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _on_search_youtube(self):
         query = self.ent_search.get().strip()
         if not query:
@@ -2416,15 +2626,20 @@ class StudioCockpitWindow:
         results = self.downloader.search_youtube(query, limit=10)
 
         def _update():
+            self._yt_search_results.clear()
             for item in self.tree_tracks.get_children():
                 self.tree_tracks.delete(item)
-            for r in results:
+            for idx, r in enumerate(results):
+                vid = r.get("video_id", "")
+                self._yt_search_results[vid] = r
                 dur_min = r.get("duration", 0) // 60
                 dur_sec = r.get("duration", 0) % 60
                 m_type = "Sing-Along" if r.get("is_sing_along") else "Karaoke"
+                row_tag = "row_even" if idx % 2 == 0 else "row_odd"
                 self.tree_tracks.insert(
                     "",
                     "end",
+                    iid=f"yt_{vid}",
                     values=(
                         "YT",
                         r.get("title"),
@@ -2432,11 +2647,12 @@ class StudioCockpitWindow:
                         f"{dur_min}:{dur_sec:02d}",
                         m_type,
                         "☁️ (Click to fetch)"
-                    )
+                    ),
+                    tags=(row_tag,)
                 )
-            self.lbl_status.config(text=f"Found {len(results)} YouTube tracks. Double-click to download.")
+            self.lbl_status.config(text=f"Found {len(results)} YouTube tracks. Double-click to download & rehearse.")
 
-        self.root.after_idle(_update)
+        self.dispatch_to_main(_update)
 
     def _on_record_siren_sweep(self):
         if self.is_calibrating:
