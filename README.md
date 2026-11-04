@@ -8,11 +8,11 @@
 
 # 🌺 Tiki Rehearsal Lounge (Vocal Coach & Studio)
 
-[![Version](https://img.shields.io/badge/Version-1.0.6-ff007f.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.7-ff007f.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-00f0ff.svg)](LICENSE)
 [![Platform: Linux & Windows](https://img.shields.io/badge/Platform-Linux%20(AppImage)%20%7C%20Windows-orange.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-39ff14.svg)]()
-[![Tests: 34 Passed](https://img.shields.io/badge/Tests-34%20Passing-brightgreen.svg)]()
+[![Tests: 44 Passed](https://img.shields.io/badge/Tests-44%20Passing-brightgreen.svg)]()
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Creator-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/todd0042)
 
 > **Your personal vocal gym, pitch calibration laboratory, and post-take performance report card studio — companion to Tiki Karaoke or 100% standalone.**
@@ -100,17 +100,17 @@ The desktop interface is rendered in Tiki's signature `#0d0814` midnight violet 
 ## 🚀 Quick Download & Installation
 
 ### Option A: Universal Linux AppImage
-1. Download **`TikiRehearsalLounge-v1.0.6-x86_64.AppImage`** from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge) (`rehearsal-linux` channel).
+1. Download **`TikiRehearsalLounge-v1.0.7-x86_64.AppImage`** from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge) (`rehearsal-linux` channel).
 2. Make it executable and run:
    ```bash
-   chmod +x TikiRehearsalLounge-v1.0.6-x86_64.AppImage
-   ./TikiRehearsalLounge-v1.0.6-x86_64.AppImage
+   chmod +x TikiRehearsalLounge-v1.0.7-x86_64.AppImage
+   ./TikiRehearsalLounge-v1.0.7-x86_64.AppImage
    ```
 
 ### Option B: Windows 10 & 11 (64-Bit)
 Download from [GitHub Releases](https://github.com/Todd0042/tiki-rehearsal-lounge/releases) or [itch.io](https://todd0042.itch.io/tiki-karaoke-lounge):
-* **Turnkey Installer**: Run **`TikiRehearsalLoungeSetup-v1.0.6.exe`** (channel: `rehearsal-windows`) for Start Menu and Desktop shortcuts.
-* **Portable ZIP**: Extract **`TikiRehearsalLounge-Windows-v1.0.6.zip`** (channel: `rehearsal-windows-portable`) and launch `TikiRehearsalLounge.exe` (no administrator privileges required).
+* **Turnkey Installer**: Run **`TikiRehearsalLoungeSetup-v1.0.7.exe`** (channel: `rehearsal-windows`) for Start Menu and Desktop shortcuts.
+* **Portable ZIP**: Extract **`TikiRehearsalLounge-Windows-v1.0.7.zip`** (channel: `rehearsal-windows-portable`) and launch `TikiRehearsalLounge.exe` (no administrator privileges required).
 
 ### Option C: Running from Source (Linux & Cross-Platform)
 

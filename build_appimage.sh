@@ -48,6 +48,11 @@ pyinstaller --clean -y --onedir \
     --hidden-import audio.recorder \
     --hidden-import audio.tone_generator \
     --hidden-import audio.vocal_analyzer \
+    --hidden-import audio.lyric_manager \
+    --hidden-import audio.parallel_analyzer \
+    --hidden-import audio.stt_engine \
+    --hidden-import storage \
+    --hidden-import storage.take_partitions \
     --hidden-import ai \
     --hidden-import ai.offline_coach \
     --hidden-import db \
@@ -90,6 +95,13 @@ tar -xzf "$LLAMA_TAR" -C "/tmp"
 cp -v /tmp/llama-b12078/llama-server "$APPDIR/usr/bin/"
 cp -v /tmp/llama-b12078/*.so* "$APPDIR/usr/bin/"
 chmod +x "$APPDIR/usr/bin/llama-server"
+
+# Stage Whisper STT Linux engine into AppDir if present
+if [ -d "${REPO_ROOT}/bin/whisper" ]; then
+    echo "=== Staging Linux whisper binaries into AppDir ==="
+    cp -rv "${REPO_ROOT}/bin/whisper"/* "$APPDIR/usr/bin/" 2>/dev/null || true
+    chmod +x "$APPDIR/usr/bin/whisper-server" "$APPDIR/usr/bin/whisper-cli" 2>/dev/null || true
+fi
 
 if [ -f "${REPO_ROOT}/static/tiki-icon.png" ]; then
     cp "${REPO_ROOT}/static/tiki-icon.png" "$APPDIR/tiki-icon.png"

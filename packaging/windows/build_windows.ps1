@@ -99,6 +99,19 @@ if (Test-Path "$ScriptDir\bin") {
     }
 }
 
+if (Test-Path "$RepoDir\bin\whisper-win\Release") {
+    $targetBins = @(
+        "$ScriptDir\dist\TikiRehearsalLounge\bin",
+        "$ScriptDir\dist\TikiRehearsalLounge\_internal\bin",
+        "$LocalDist\TikiRehearsalLounge\bin",
+        "$LocalDist\TikiRehearsalLounge\_internal\bin"
+    )
+    foreach ($tb in $targetBins) {
+        if (-not (Test-Path $tb)) { New-Item -ItemType Directory -Force -Path $tb | Out-Null }
+        Copy-Item "$RepoDir\bin\whisper-win\Release\*.*" "$tb\" -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host "`n[5/5] Packaging release archives..." -ForegroundColor Yellow
 
 # Parse version

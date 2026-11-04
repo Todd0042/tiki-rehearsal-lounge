@@ -2417,7 +2417,7 @@ class StudioCockpitWindow:
             self.lbl_auditory_num.config(text="--")
             self.lbl_auditory_sub.config(text="Harmonic musicality & listener appeal")
 
-        self.tile_pitch._val_lbl.config(text=f"{report.pitch_accuracy_pct}%")
+        self.tile_pitch._val_lbl.config(text=f"{report.pitch_accuracy_pct:.1f}%")
         self.tile_into._val_lbl.config(text=f"{report.intonation_cents:+0.1f}¢")
         self.tile_rhythm._val_lbl.config(text=f"{report.rhythm_offset_ms:+0.1f}ms")
         self.tile_vib._val_lbl.config(text=f"{report.vibrato_rate_hz:0.1f} Hz" if report.vibrato_present else "Straight")
