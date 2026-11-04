@@ -621,6 +621,19 @@ class ParallelVocalTakeAnalyzer:
             "max_hz": take_max_hz
         })
 
+        # Auditory Pleasingness & Artistic Musicality (Harmonic Consonance vs melody)
+        auditory_score, auditory_verdict, harmonic_consonance = self.analyzer._analyze_auditory_appeal(
+            singer_audio=singer_audio,
+            sr=sr,
+            s_pitches=s_pitches,
+            ref_pitches=ref_pitches,
+            hop_ms=hop_ms,
+            sf_ratio=sf_ratio,
+            vib_present=vib_present,
+            vib_rate=vib_rate,
+            vib_depth=vib_depth
+        )
+
         # Calculate Overall Score (0 - 100)
         intonation_penalty = min(20.0, abs(intonation))
         rhythm_penalty = min(20.0, abs(rhythm_ms) / 10.0)
@@ -713,7 +726,10 @@ class ParallelVocalTakeAnalyzer:
             vibrato_style_verdict=vibrato_style_verdict,
             timeline_series=timeline_series,
             vocal_registers=vocal_registers,
-            intonation_bias=intonation_bias
+            intonation_bias=intonation_bias,
+            auditory_appeal_score=auditory_score,
+            auditory_appeal_verdict=auditory_verdict,
+            harmonic_consonance_pct=harmonic_consonance
         )
 
         return report, lyric_alignment

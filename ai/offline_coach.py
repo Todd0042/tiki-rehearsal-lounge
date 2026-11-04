@@ -349,7 +349,7 @@ class OfflineVocalCoach:
                         "--host", "127.0.0.1",
                         "--threads", str(n_threads),
                         "-ngl", ngl,
-                        "--ctx-size", "2048",
+                        "--ctx-size", "4096",
                         "--log-disable"
                     ]
                     flags = 0
@@ -398,7 +398,7 @@ class OfflineVocalCoach:
                 n_gpu_layers = 99 if accel == "gpu" else 0
                 self._llm = Llama(
                     model_path=str(installed["path"]),
-                    n_ctx=2048,
+                    n_ctx=4096,
                     n_threads=n_threads,
                     n_gpu_layers=n_gpu_layers,
                     verbose=False
@@ -530,7 +530,7 @@ class OfflineVocalCoach:
         )
         if result:
             return result
-        return "Coach note: Keep practicing with relaxed throat and diaphragmatic breath support!"
+        return self._generate_rule_based_chat_reply(user_message, report_data, track_info, lyric_alignment)
 
     def _build_debrief_prompt(
         self,
@@ -560,52 +560,41 @@ class OfflineVocalCoach:
             for s in struggles:
                 phrase_section += f"- [{s['timestamp']}] ({s['note_span']}): {s['detail']} | Mechanical Cue: {s.get('cue', '')}\n"
 
-        prog_section = ""
-        if progression_data:
-            take_num = progression_data.get("song_take_number", 1)
-            delta_score = progression_data.get("delta_score", 0)
-            delta_pitch = progression_data.get("delta_pitch_pct", 0.0)
-            recent = progression_data.get("recent_take_summaries", [])
-            has_history = progression_data.get("has_prior_history", False)
-
-            prog_section += f"\nRehearsal Progression Context (Take #{take_num} on this track):\n"
-            if has_history:
-                prog_section += f"- Score change from immediately prior take: {delta_score:+d} points\n"
-                prog_section += f"- Pitch accuracy change: {delta_pitch:+0.1f}%\n"
-                if recent:
-                    prog_section += f"- Recent history on this track: {'; '.join(recent)}\n"
-            else:
-                prog_section += "- This is your baseline take (Attempt #1) for this track.\n"
-            prog_section += f"- Total practice takes in studio history: {progression_data.get('studio_total_takes', 1)}\n"
-
-        vib_str = (
-            f"{report.get('vibrato_rate_hz', 0.0)} Hz (±{report.get('vibrato_depth_cents', 0)}¢)"
-            if report.get("vibrato_present")
-            else "Straight-tone / Minimal vibrato"
-        )
         feedback_list = report.get("coach_feedback", [])
         feedback_section = ""
         if feedback_list:
-            feedback_section = "\nAcoustic Telemetry Observations:\n" + "\n".join([f"- {f}" for f in feedback_list[:4]]) + "\n"
+            feedback_section = "\nCoach Take Observations:\n" + "\n".join([f"- {fb}" for fb in feedback_list]) + "\n"
+
+        prog_section = ""
+        if progression_data and progression_data.get("session_count", 0) > 1:
+            prog_section = (
+                f"\nSinger Progression Trajectory:\n"
+                f"- Total Recorded Takes: {progression_data.get('session_count')}\n"
+                f"- Historical Score Delta: {progression_data.get('score_delta', 0):+d} pts\n"
+                f"- Pitch Accuracy Delta: {progression_data.get('pitch_delta', 0.0):+0.1f}%\n"
+                f"- Intonation Trend: {progression_data.get('intonation_trend', 'stable')}\n"
+            )
 
         prompt = (
             f"<|im_start|>system\n{DEBRIEF_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n"
-            f"Here are the objective audio analysis results for my vocal take of '{track_title}' {f'by {track_artist}' if track_artist else ''}:\n"
+            f"Here are the raw acoustic telemetry metrics for my take of '{track_title}' {f'by {track_artist}' if track_artist else ''}:\n"
+            f"[PARTITION: ACOUSTIC_CORE]\n"
             f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
-            f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% within ±50 cents\n"
-            f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', '')})\n"
-            f"- Rhythm Pocket: {report.get('rhythm_offset_ms', 0):+0.1f} ms onset latency ({report.get('rhythm_verdict', 'Locked On')})\n"
-            f"- Resonance Ring: {report.get('resonance_verdict', '')} (ratio {report.get('singers_formant_ratio', 0)})\n"
-            f"- Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', '')})\n"
-            f"- Glottal Attack Dynamics: {report.get('onset_attack_verdict', '')}\n"
-            f"- Vibrato: {vib_str} (Bloom Style: {report.get('vibrato_style_verdict', 'Natural')})\n"
-            f"- Dynamic Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', '')})\n"
-            f"- Sibilance & Fry: Sibilance {report.get('sibilance_verdict', '')}, Fry {report.get('vocal_fry_pct', 0)}% ({report.get('vocal_fry_verdict', '')})\n"
-            f"- Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')}\n"
+            f"- Auditory Appeal: {report.get('auditory_appeal_score', 0)}/100 ({report.get('auditory_appeal_verdict', 'Harmonically Consonant')})\n"
+            f"- Harmonic Consonance: {report.get('harmonic_consonance_pct', 0.0):.1f}%\n"
+            f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% (within ±50¢)\n"
+            f"- Intonation Bias: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
+            f"- Rhythm / Onset Pocket: {report.get('rhythm_offset_ms', 0):+0.1f} ms ({report.get('rhythm_verdict', 'Locked On')})\n"
             f"- Attack Velocity & Scooping: {report.get('pitch_scoop_pct', 0)}% scooped attacks ({report.get('attack_velocity_verdict', 'Clean')})\n"
-            f"- Dynamic Story Arc: {report.get('dynamic_contrast_db', 0)} dB contrast ({report.get('dynamic_arc_verdict', 'Natural')})\n"
-            f"- Key Shift: {shift:+d} semitones (Recommended: {rec_shift:+d} semitones)\n"
+            f"- Dynamic Story Arc: {report.get('dynamic_contrast_db', 0):.1f} dB contrast ({report.get('dynamic_arc_verdict', 'Natural')})\n"
+            f"- Vibrato: {report.get('vibrato_rate_hz', 0)} Hz (±{report.get('vibrato_depth_cents', 0)}¢) ({report.get('vibrato_style_verdict', 'Natural')})\n"
+            f"- Resonance Ring (Singer's Formant): {report.get('singers_formant_ratio', 0):0.2f} ratio ({report.get('resonance_verdict', 'Balanced')})\n"
+            f"- Diaphragmatic Breath Support: {report.get('breath_support_pct', 0)}% phrase-end stability ({report.get('breath_support_verdict', 'Stable')})\n"
+            f"- Onset Attacks: {report.get('balanced_onsets_pct', 0)}% balanced ({report.get('onset_attack_verdict', 'Balanced')})\n"
+            f"- Dynamics Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', 'Balanced')})\n"
+            f"- Vocal Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')} ({report.get('take_range_semitones', 0)} st)\n"
+            f"- Key Shift: {shift:+d} semitones (Recommended: {rec_shift:+d})\n"
             f"{feedback_section}"
             f"{phrase_section}\n"
             f"{prog_section}\n"
@@ -613,10 +602,10 @@ class OfflineVocalCoach:
             f"CRITICAL INSTRUCTION: The singer ALREADY sees the raw timestamped highlight list and struggle list in the UI cards directly above your text. "
             f"DO NOT duplicate or re-list them. Deliver your unique, expert vocal masterclass synthesis with:\n"
             f"1. 🔬 **Acoustic Diagnosis (The Root-Cause 'Why')**: Explain the underlying vocal fold physiology, airflow, attack scooping, and vocal tract resonance behind my take metrics.\n"
-            f"2. 🛠️ **Targeted Micro-Drill (30-Second Practice Fix)**: Prescribe ONE concrete, isolated physical vocal exercise (e.g. SOVTE straw phonation, puffy-cheek 'GUG', or staccato onset drill) to practice before my next take.\n"
-            f"3. 🎯 **Priority Directive for Take #2**: ONE single, clear mental focus directive for my very next rehearsal take.\n"
-            f"4. 📈 **Vocal Progression Trajectory**: A 2-sentence summary of my trajectory across takes (or benchmark if Take #1).\n"
-            f"Speak directly to me like a master studio director. Do NOT repeat the cards above.<|im_end|>\n"
+            f"2. 🎵 **Artistic Musicality & Auditory Appeal**: Comment on how my personal styling, phrasing, and harmonic choices come across to listeners.\n"
+            f"3. 🎯 **Next-Take Tactical Focus**: Give me 1-2 concrete, high-leverage physical cues for my immediate next take.\n"
+            f"4. 🛠️ **Micro-Drills (Somatic Exercises)**: 2 hyper-focused vocal exercises with exact syllable, starting pitch, and execution instructions.\n"
+            f"<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
         return prompt
@@ -638,13 +627,13 @@ class OfflineVocalCoach:
         if report:
             highlights = report.get("phrase_highlights", [])
             struggles = report.get("phrase_struggles", [])
-            h_lines = [f"• [{h['timestamp']}] ({h['note_span']}): {h['detail']}" for h in highlights]
-            s_lines = [f"• [{s['timestamp']}] ({s['note_span']}): {s['detail']} | Mechanical Cue: {s.get('cue', '')}" for s in struggles]
+            h_lines = [f"• [{h['timestamp']}] ({h['note_span']}): {h['detail']}" for h in highlights[:4]]
+            s_lines = [f"• [{s['timestamp']}] ({s['note_span']}): {s['detail']} | Cue: {s.get('cue', '')}" for s in struggles[:4]]
             h_str = "\n".join(h_lines) if h_lines else "None flagged."
             s_str = "\n".join(s_lines) if s_lines else "None flagged."
 
             feedback_list = report.get("coach_feedback", [])
-            feedback_str = "\n".join([f"- {f}" for f in feedback_list[:4]]) if feedback_list else "None."
+            feedback_str = "\n".join([f"- {f}" for f in feedback_list[:3]]) if feedback_list else "None."
 
             rhythm_ms = report.get("rhythm_offset_ms", 0.0)
             rhythm_verdict = report.get("rhythm_verdict", "Locked On")
@@ -654,34 +643,54 @@ class OfflineVocalCoach:
                 else "Straight-tone / Minimal vibrato"
             )
 
+            # Safe lyric partition extraction (handles None safely)
             lyric_status = lyric_alignment.get("status", "unavailable") if lyric_alignment else "unavailable"
             lyric_summary = lyric_alignment.get("summary_text", "No synchronized lyrics were tracked for this rehearsal take.") if lyric_alignment else "No synchronized lyrics were tracked for this rehearsal take."
-            lyric_details = lyric_alignment.get("line_details", []) if lyric_alignment else []
-            missed_words = lyric_alignment.get("missed_words", []) if lyric_alignment else []
-            word_timeline = lyric_alignment.get("word_timeline", []) if lyric_alignment else []
             
-            lyric_sample_str = ""
-            if lyric_details:
-                lyric_sample_str = "\n".join([
-                    f"• [{l.get('timestamp', '0:00')}] \"{l.get('line', '')}\" -> {'Sung (' + str(l.get('sync_offset_ms', 0)) + 'ms ' + str(l.get('sync_verdict', '')) + ')' if l.get('sung') else 'Missed'}"
-                    for l in lyric_details[:10]
-                ])
+            if lyric_alignment and lyric_status in ("aligned", "transcribed_take_only"):
+                lyric_details = lyric_alignment.get("line_details", []) or []
+                missed_words = lyric_alignment.get("missed_words", []) or []
+                word_timeline = lyric_alignment.get("word_timeline", []) or []
 
-            missed_words_str = ", ".join([m.get("word", "") for m in missed_words[:12]]) if missed_words else "None"
-            word_timeline_sample = " ".join([w.get("word", "") for w in word_timeline[:35]]) if word_timeline else ""
+                lyric_sample_str = ""
+                if lyric_details:
+                    lyric_sample_str = "\n".join([
+                        f"• [{l.get('timestamp', '0:00')}] \"{l.get('line', '')}\" -> {'Sung (' + str(l.get('sync_offset_ms', 0)) + 'ms ' + str(l.get('sync_verdict', '')) + ')' if l.get('sung') else 'Missed'}"
+                        for l in lyric_details[:6]
+                    ])
+
+                missed_words_str = ", ".join([m.get("word", "") for m in missed_words[:10]]) if missed_words else "None"
+                word_timeline_sample = " ".join([w.get("word", "") for w in word_timeline[:25]]) if word_timeline else ""
+
+                lyrics_partition_str = (
+                    f"Status: {lyric_status}\n"
+                    f"Summary: {lyric_summary}\n"
+                    f"- Word Accuracy: {lyric_alignment.get('word_accuracy_pct', 0.0):.1f}% (WER: {lyric_alignment.get('word_error_rate_pct', 0.0):.1f}%)\n"
+                    f"- Target Words Sung: {lyric_alignment.get('words_matched_count', 0)}/{lyric_alignment.get('total_target_words', 0)}\n"
+                    f"- Missed Words: {missed_words_str}\n"
+                    f"{f'- Transcribed Words Sample: \"{word_timeline_sample}...\"' + chr(10) if word_timeline_sample else ''}"
+                    f"{f'Tracked Lines Sample:' + chr(10) + lyric_sample_str + chr(10) if lyric_sample_str else ''}"
+                )
+            else:
+                lyrics_partition_str = (
+                    f"Status: {lyric_status}\n"
+                    f"Summary: {lyric_summary}\n"
+                )
 
             all_phrases = report.get("all_phrases", [])
             phrase_timeline_str = ""
             if all_phrases:
-                phrase_timeline_str = f"Total phrases tracked across song: {len(all_phrases)}\n"
-                for p in all_phrases[:12]:
-                    phrase_timeline_str += f"• Phrase #{p.get('phrase_id', '')} [{p.get('timestamp', '')}] ({p.get('note_span', '')}): Acc {p.get('accuracy_pct', 0)}%, Drift {p.get('cents_drift', 0):+0.1f}¢, TailSag {p.get('tail_sag_cents', 0):+0.1f}¢ -> {p.get('status', 'solid').upper()}\n"
+                phrase_timeline_str = f"Phrases Sample (out of {len(all_phrases)} tracked):\n"
+                for p in all_phrases[:6]:
+                    phrase_timeline_str += f"• #{p.get('phrase_id', '')} [{p.get('timestamp', '')}] ({p.get('note_span', '')}): Acc {p.get('accuracy_pct', 0)}%, Drift {p.get('cents_drift', 0):+0.1f}¢ -> {p.get('status', 'solid').upper()}\n"
 
             prompt += (
                 f"\n=== SINGER'S LATEST PERFORMANCE TELEMETRY ===\n"
                 f"Track: '{track_title}' {f'by {track_artist}' if track_artist else ''}\n"
                 f"[PARTITION: ACOUSTIC_CORE]\n"
                 f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
+                f"- Auditory Appeal: {report.get('auditory_appeal_score', 0)}/100 ({report.get('auditory_appeal_verdict', 'Harmonically Consonant')})\n"
+                f"- Harmonic Consonance: {report.get('harmonic_consonance_pct', 0.0):.1f}%\n"
                 f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0):.1f}% (within ±50¢)\n"
                 f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
                 f"- Attack Velocity & Scooping: {report.get('pitch_scoop_pct', 0)}% scooped attacks ({report.get('attack_velocity_verdict', 'Clean')})\n"
@@ -700,17 +709,12 @@ class OfflineVocalCoach:
                 f"Focus Moments:\n{s_str}\n"
                 f"{phrase_timeline_str}"
                 f"\n[PARTITION: LYRICS_ALIGNMENT]\n"
-                f"Status: {lyric_status}\n"
-                f"Summary: {lyric_summary}\n"
-                f"- Word Accuracy: {lyric_alignment.get('word_accuracy_pct', 0):.1f}% (WER: {lyric_alignment.get('word_error_rate_pct', 0):.1f}%)\n"
-                f"- Target Words Sung: {lyric_alignment.get('words_matched_count', 0)}/{lyric_alignment.get('total_target_words', 0)}\n"
-                f"- Missed Words: {missed_words_str}\n"
-                f"{f'- Transcribed Words Sample: \"{word_timeline_sample}...\"' + chr(10) if word_timeline_sample else ''}"
-                f"{f'Tracked Lines Sample:' + chr(10) + lyric_sample_str + chr(10) if lyric_sample_str else ''}"
+                f"{lyrics_partition_str}"
                 f"\nCRITICAL GROUNDING DIRECTIVE:\n"
                 f"1. When the user asks about lyrics, words, or song phrasing, ground your answer strictly in [PARTITION: LYRICS_ALIGNMENT]. Quote the exact target and sung words.\n"
                 f"2. If [PARTITION: LYRICS_ALIGNMENT] status is 'transcribed_take_only', tell the user what words were transcribed from their take and provide feedback on their phrasing.\n"
                 f"3. If [PARTITION: LYRICS_ALIGNMENT] status is 'unavailable', tell the user lyric transcription was not active for this rehearsal take, and NEVER guess lyrics from pitch or tone!\n"
+                f"4. When the user asks about styling, runs, or personal musical interpretation, explain that their Auditory Appeal score ({report.get('auditory_appeal_score', 0)}/100) measures how pleasant and consonant their choices sound to human listeners, even when deviating from the original melody!\n"
             )
 
         if debrief_text:
@@ -718,7 +722,7 @@ class OfflineVocalCoach:
 
         prompt += "<|im_end|>\n"
 
-        # Prior history turns (exclude the trailing turn if it matches user_msg to avoid duplicate tokens)
+        # Prior history turns (exclude trailing duplicate user turns)
         prior_history = history[:-1] if (history and history[-1].get("role") == "user" and history[-1].get("content") == user_msg) else history
         for turn in prior_history[-4:]:
             role = turn.get("role", "user")
@@ -727,6 +731,83 @@ class OfflineVocalCoach:
 
         prompt += f"<|im_start|>user\n{user_msg}<|im_end|>\n<|im_start|>assistant\n"
         return prompt
+
+    @staticmethod
+    def _generate_rule_based_chat_reply(
+        user_msg: str,
+        report: Optional[Dict[str, Any]],
+        track_info: Optional[Dict[str, Any]] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Intelligent fallback chat response grounded in actual take telemetry when LLM is unavailable."""
+        msg_lower = user_msg.lower()
+        title = track_info.get("title", "your song") if track_info else "your song"
+
+        # 1. Lyrics query
+        if any(w in msg_lower for w in ["lyric", "word", "words", "missed", "text", "lines"]):
+            if lyric_alignment and lyric_alignment.get("status") == "aligned":
+                missed = lyric_alignment.get("missed_words", [])
+                acc = lyric_alignment.get("word_accuracy_pct", 0.0)
+                matched = lyric_alignment.get("words_matched_count", 0)
+                total = lyric_alignment.get("total_target_words", 0)
+                if missed:
+                    missed_sample = ", ".join([f'"{m.get("word")}"' for m in missed[:6]])
+                    return (
+                        f"Maestro Tiki: For '{title}', your lyric accuracy was {acc:.1f}% ({matched}/{total} words on-cue). "
+                        f"A few words that were missed or slightly off-sync: {missed_sample}. Focus on steady rhythmic cue entries!"
+                    )
+                else:
+                    return (
+                        f"Maestro Tiki: You nailed the lyrics for '{title}'! "
+                        f"All target words were accounted for with {acc:.1f}% word-level alignment."
+                    )
+            elif lyric_alignment and lyric_alignment.get("status") == "transcribed_take_only":
+                sample = " ".join([w.get("word", "") for w in lyric_alignment.get("word_timeline", [])[:20]])
+                return (
+                    f"Maestro Tiki: Here is what was transcribed from your vocal take: \"{sample}...\". "
+                    f"Your phrasing had good diction clarity ({lyric_alignment.get('diction_clarity_pct', 0):.0f}%)."
+                )
+            else:
+                return (
+                    f"Maestro Tiki: Synchronized lyric transcription was not active for this rehearsal take of '{title}'. "
+                    f"To get precise word-level error tracking, make sure offline STT is enabled in Settings!"
+                )
+
+        # 2. Auditory appeal / styling / musicality query
+        if any(w in msg_lower for w in ["auditory", "appeal", "style", "styling", "pleasant", "musicality", "pleasing", "harmony", "human", "sound"]):
+            if report:
+                score = report.get("auditory_appeal_score", 0)
+                verdict = report.get("auditory_appeal_verdict", "Harmonically Consonant")
+                cons = report.get("harmonic_consonance_pct", 0.0)
+                return (
+                    f"Maestro Tiki: Your Auditory Appeal score is {score}/100 ({verdict}), with {cons:.1f}% harmonic consonance. "
+                    f"This measures how auditorily pleasing your performance is to human listeners — recognizing your artistic styling and "
+                    f"harmonic embellishments rather than just grading rigid note-matching!"
+                )
+
+        # 3. Pitch / Intonation / Accuracy query
+        if any(w in msg_lower for w in ["pitch", "intonation", "sharp", "flat", "accuracy", "cents", "tune"]):
+            if report:
+                acc = report.get("pitch_accuracy_pct", 0.0)
+                drift = report.get("intonation_cents", 0.0)
+                verdict = report.get("intonation_verdict", "Center")
+                return (
+                    f"Maestro Tiki: Your pitch accuracy was {acc:.1f}% (within quarter-tone tolerance), with an intonation drift of {drift:+0.1f}¢ ({verdict}). "
+                    f"Keep your breath supported from the diaphragm to keep sustained pitches centered!"
+                )
+
+        # 4. Default grounded reply
+        if report:
+            score = report.get("overall_score", 0)
+            aud = report.get("auditory_appeal_score", 0)
+            feedback = report.get("coach_feedback", [])
+            fb_text = feedback[0] if feedback else "Keep practicing steady diaphragmatic support and forward facial resonance."
+            return (
+                f"Maestro Tiki: On '{title}', your overall Take Score was {score}/100 and Auditory Appeal was {aud}/100. "
+                f"Key coaching focus: {fb_text}"
+            )
+
+        return "Maestro Tiki: Keep practicing with steady ribcage breath support and forward vocal resonance!"
 
     @staticmethod
     def _generate_rule_based_debrief(

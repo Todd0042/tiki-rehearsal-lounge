@@ -127,6 +127,11 @@ class TakeAnalysisReport:
     vocal_registers: Dict[str, Any] = None
     intonation_bias: Dict[str, Any] = None
 
+    # Auditory Pleasingness & Artistic Musicality
+    auditory_appeal_score: int = 0         # 0 - 100 listener musicality & pleasingness
+    auditory_appeal_verdict: str = "Harmonically Consonant"
+    harmonic_consonance_pct: float = 0.0   # % interval harmony & scale agreement
+
     def __post_init__(self):
         if self.phrase_highlights is None:
             self.phrase_highlights = []
@@ -448,6 +453,19 @@ class VocalTakeAnalyzer:
         dynamic_contrast_db, dynamic_arc_verdict = self._analyze_dynamic_arc(singer_audio, sr, s_pitches, hop_ms=15.0)
         vibrato_bloom_ms, vibrato_style_verdict = self._analyze_vibrato_bloom(s_pitches, hop_ms=15.0, vib_present=vib_present)
 
+        # 10c. Auditory Appeal & Stylistic Musicality (Harmonic consonance vs melody)
+        auditory_score, auditory_verdict, harmonic_consonance = self._analyze_auditory_appeal(
+            singer_audio=singer_audio,
+            sr=sr,
+            s_pitches=s_pitches,
+            ref_pitches=ref_pitches,
+            hop_ms=15.0,
+            sf_ratio=sf_ratio,
+            vib_present=vib_present,
+            vib_rate=vib_rate,
+            vib_depth=vib_depth
+        )
+
         # 11. Overall Score calculation (0 - 100)
         # 50% pitch accuracy, 15% intonation, 15% rhythm, 10% breath support, 10% balanced onsets
         intonation_penalty = min(20.0, abs(intonation))
@@ -563,7 +581,10 @@ class VocalTakeAnalyzer:
             dynamic_contrast_db=dynamic_contrast_db,
             dynamic_arc_verdict=dynamic_arc_verdict,
             vibrato_bloom_ms=vibrato_bloom_ms,
-            vibrato_style_verdict=vibrato_style_verdict
+            vibrato_style_verdict=vibrato_style_verdict,
+            auditory_appeal_score=auditory_score,
+            auditory_appeal_verdict=auditory_verdict,
+            harmonic_consonance_pct=harmonic_consonance
         )
 
     def _suppress_speaker_bleed(
@@ -1137,6 +1158,130 @@ class VocalTakeAnalyzer:
             verdict = "Continuous Classic Vibrato"
 
         return round(mean_delay, 1), verdict
+
+    def _analyze_auditory_appeal(
+        self,
+        singer_audio: np.ndarray,
+        sr: int,
+        s_pitches: np.ndarray,
+        ref_pitches: Optional[np.ndarray] = None,
+        hop_ms: float = 15.0,
+        sf_ratio: float = 0.35,
+        vib_present: bool = False,
+        vib_rate: float = 0.0,
+        vib_depth: float = 0.0
+    ) -> Tuple[int, str, float]:
+        """
+        Evaluates the performer's artistic styling, harmonic consonance, and overall auditory pleasingness.
+
+        Unlike rigid note-matching, this metric recognizes that vocal performers frequently introduce
+        stylistic interpretation, vocal runs, harmony lines (e.g. 3rds/6ths), or blues/soul inflections.
+        It measures:
+        1. Harmonic Consonance: Psychoacoustic consonance of sung notes relative to song melody/scale.
+        2. Intonation Purity: Purity and stability of pitch centering on chosen notes.
+        3. Timbral Warmth: Smooth acoustic spectral balance and singer's formant projection.
+        4. Phrasing & Vibrato Maturity: Natural expressive bloom without harshness.
+        """
+        s_voiced = s_pitches[s_pitches > 0]
+        if len(s_voiced) < 20:
+            return 0, "No Vocal Signal Detected", 0.0
+
+        s_midi = np.array([hz_to_midi(f) for f in s_voiced])
+
+        # 1. Harmonic Consonance Evaluation
+        # Consonance weights for interval classes (0 - 11 semitones)
+        consonance_weights = {
+            0: 1.00,  # Unison / Octave
+            7: 0.96,  # Perfect 5th
+            5: 0.92,  # Perfect 4th
+            4: 0.90,  # Major 3rd
+            3: 0.88,  # Minor 3rd
+            9: 0.88,  # Major 6th
+            8: 0.85,  # Minor 6th
+            2: 0.78,  # Major 2nd (passing tone, soul tension)
+            10: 0.76, # Minor 7th (blues/pentatonic inflection)
+            11: 0.62, # Major 7th (leading tone)
+            6: 0.40,  # Tritone
+            1: 0.30   # Minor 2nd (dissonant clash)
+        }
+
+        has_aligned_ref = (
+            ref_pitches is not None and
+            len(ref_pitches) == len(s_pitches) and
+            np.sum(ref_pitches > 0) >= 20
+        )
+
+        if has_aligned_ref:
+            # Compare singer pitch to reference melody per timestamp
+            both_voiced_mask = (s_pitches > 0) & (ref_pitches > 0)
+            if np.sum(both_voiced_mask) >= 20:
+                s_both = np.array([hz_to_midi(f) for f in s_pitches[both_voiced_mask]])
+                r_both = np.array([hz_to_midi(f) for f in ref_pitches[both_voiced_mask]])
+                deltas = np.abs(s_both - r_both)
+                nearest_semi = np.round(deltas).astype(int)
+                interval_classes = nearest_semi % 12
+                cents_errors = np.abs(deltas - nearest_semi) * 100.0
+
+                frame_scores = []
+                for ic, err in zip(interval_classes, cents_errors):
+                    weight = consonance_weights.get(ic, 0.60)
+                    fine_purity = max(0.0, 1.0 - (err / 50.0) ** 1.3)
+                    # Even when diverging from melody, singing a consonant harmony (3rd, 5th, etc.) in tune scores high
+                    frame_scores.append(weight * (0.60 + 0.40 * fine_purity) * 100.0)
+                harmonic_consonance_pct = float(np.mean(frame_scores))
+            else:
+                has_aligned_ref = False
+
+        if not has_aligned_ref:
+            # Chromatic and tonal center evaluation
+            cents_from_target = np.abs(s_midi - np.round(s_midi)) * 100.0
+            purity_scores = np.maximum(0.0, 100.0 - cents_from_target * 2.0)
+
+            # Estimate tonal center via pitch class histogram
+            pitch_classes = (np.round(s_midi).astype(int)) % 12
+            counts = np.bincount(pitch_classes, minlength=12)
+            tonic = int(np.argmax(counts))
+            intervals_from_tonic = (pitch_classes - tonic) % 12
+            scale_scores = np.array([consonance_weights.get(ic, 0.70) * 100.0 for ic in intervals_from_tonic])
+            harmonic_consonance_pct = float(0.50 * np.mean(purity_scores) + 0.50 * np.mean(scale_scores))
+
+        # 2. Intonation Purity on Chosen Target Notes
+        cents_offsets = np.abs(s_midi - np.round(s_midi)) * 100.0
+        intonation_purity = float(np.mean(np.maximum(0.0, 100.0 - cents_offsets * 2.2)))
+
+        # 3. Timbral Warmth & Resonance Euphony (Singer's Formant + absence of distortion)
+        timbre_warmth = min(100.0, max(45.0, (sf_ratio / 0.38) * 85.0))
+
+        # 4. Phrasing Flow & Vibrato Maturity
+        if vib_present:
+            if 4.5 <= vib_rate <= 6.8 and 25.0 <= vib_depth <= 95.0:
+                vib_flow = 95.0
+            else:
+                vib_flow = 84.0
+        else:
+            vib_flow = 76.0  # Controlled straight tone
+
+        # Composite Auditory Pleasingness (0 - 100)
+        composite = (
+            (harmonic_consonance_pct * 0.45) +
+            (intonation_purity * 0.25) +
+            (timbre_warmth * 0.15) +
+            (vib_flow * 0.15)
+        )
+        score = int(round(max(10.0, min(100.0, composite))))
+
+        if score >= 90:
+            verdict = "Harmonically Rich & Captivating"
+        elif score >= 82:
+            verdict = "Melodically Pleasing & Consonant"
+        elif score >= 72:
+            verdict = "Musically Expressive & Solid"
+        elif score >= 60:
+            verdict = "Occasional Harmonic Friction"
+        else:
+            verdict = "Tonal Tension / Inharmonic"
+
+        return score, verdict, round(harmonic_consonance_pct, 1)
 
     def _analyze_resonance(
         self,

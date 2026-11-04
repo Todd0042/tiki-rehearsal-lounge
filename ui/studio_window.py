@@ -723,6 +723,40 @@ class StudioCockpitWindow:
         )
         self.lbl_score_sub.pack(anchor="w")
 
+        # Auditory Pleasingness / Artistic Appeal Banner (Top-right across from Take Score)
+        auditory_banner_frame = tk.Frame(self.score_banner, bg=COLOR_BG_CARD)
+        auditory_banner_frame.pack(side="right")
+
+        self.lbl_auditory_num = tk.Label(
+            auditory_banner_frame,
+            text="--",
+            font=("Helvetica", 36, "bold"),
+            fg=COLOR_GOLD,
+            bg=COLOR_BG_CARD
+        )
+        self.lbl_auditory_num.pack(side="right")
+
+        auditory_txt_frame = tk.Frame(auditory_banner_frame, bg=COLOR_BG_CARD)
+        auditory_txt_frame.pack(side="right", padx=14)
+
+        self.lbl_auditory_title = tk.Label(
+            auditory_txt_frame,
+            text="Auditory Appeal",
+            font=("Helvetica", 14, "bold"),
+            fg=COLOR_TEXT_MAIN,
+            bg=COLOR_BG_CARD
+        )
+        self.lbl_auditory_title.pack(anchor="e")
+
+        self.lbl_auditory_sub = tk.Label(
+            auditory_txt_frame,
+            text="Harmonic musicality & listener appeal",
+            font=("Helvetica", 9),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_BG_CARD
+        )
+        self.lbl_auditory_sub.pack(anchor="e")
+
         # Metric Tiles Grid
         grid_frame = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
         grid_frame.pack(fill="x", pady=(0, 16))
@@ -2372,6 +2406,17 @@ class StudioCockpitWindow:
             self.analysis_prog_frame.pack_forget()
 
         self.lbl_score_num.config(text=str(report.overall_score))
+
+        # Update Auditory Pleasingness / Artistic Styling Banner
+        auditory_score = getattr(report, "auditory_appeal_score", 0)
+        auditory_verdict = getattr(report, "auditory_appeal_verdict", "Harmonically Consonant")
+        if auditory_score > 0:
+            self.lbl_auditory_num.config(text=str(auditory_score))
+            self.lbl_auditory_sub.config(text=auditory_verdict)
+        else:
+            self.lbl_auditory_num.config(text="--")
+            self.lbl_auditory_sub.config(text="Harmonic musicality & listener appeal")
+
         self.tile_pitch._val_lbl.config(text=f"{report.pitch_accuracy_pct}%")
         self.tile_into._val_lbl.config(text=f"{report.intonation_cents:+0.1f}¢")
         self.tile_rhythm._val_lbl.config(text=f"{report.rhythm_offset_ms:+0.1f}ms")
@@ -2389,8 +2434,9 @@ class StudioCockpitWindow:
         self.lbl_drawer_arc.config(text=f"{report.dynamic_contrast_db:.1f} dB ({report.dynamic_arc_verdict})")
         self.lbl_drawer_bloom.config(text=f"{report.vibrato_style_verdict} ({report.vibrato_bloom_ms:.0f}ms delay)")
 
-        # Save last report for conversational context
+        # Save last report and lyric alignment for conversational context
         self._last_take_report = report
+        self._last_lyric_alignment = lyric_alignment
 
         # Clear previous feedback items
         for child in self.coach_feedback_container.winfo_children():

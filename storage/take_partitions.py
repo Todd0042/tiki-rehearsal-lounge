@@ -105,7 +105,10 @@ def save_take_partitions(
         "coach_feedback": report.coach_feedback,
         "timeline_series": getattr(report, "timeline_series", {}),
         "vocal_registers": getattr(report, "vocal_registers", {}),
-        "intonation_bias": getattr(report, "intonation_bias", {})
+        "intonation_bias": getattr(report, "intonation_bias", {}),
+        "auditory_appeal_score": getattr(report, "auditory_appeal_score", 0),
+        "auditory_appeal_verdict": getattr(report, "auditory_appeal_verdict", "Harmonically Consonant"),
+        "harmonic_consonance_pct": getattr(report, "harmonic_consonance_pct", 0.0)
     }
     with open(take_dir / "acoustic_core.json", "w", encoding="utf-8") as f:
         json.dump(acoustic_core, f, indent=2, ensure_ascii=False)
@@ -338,7 +341,10 @@ def load_take_report_and_lyrics(
         vibrato_style_verdict=core.get("vibrato_style_verdict", "Natural"),
         timeline_series=core.get("timeline_series", {}),
         vocal_registers=core.get("vocal_registers", {}),
-        intonation_bias=core.get("intonation_bias", {})
+        intonation_bias=core.get("intonation_bias", {}),
+        auditory_appeal_score=core.get("auditory_appeal_score", 0),
+        auditory_appeal_verdict=core.get("auditory_appeal_verdict", "Harmonically Consonant"),
+        harmonic_consonance_pct=core.get("harmonic_consonance_pct", 0.0)
     )
 
     lyric_alignment = LyricAlignmentReport(
