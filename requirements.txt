@@ -1,7 +1,7 @@
 # Core Audio Processing & Science
 numpy>=1.24.0
 scipy>=1.10.0
-Pillow>=9.0.0
+Pillow>=13.0.0
 
 # Optional Python Audio Device Wrapper (app includes zero-dependency ffmpeg/pw-record fallback)
 sounddevice>=0.4.6
