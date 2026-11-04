@@ -657,41 +657,60 @@ class OfflineVocalCoach:
             lyric_status = lyric_alignment.get("status", "unavailable") if lyric_alignment else "unavailable"
             lyric_summary = lyric_alignment.get("summary_text", "No synchronized lyrics were tracked for this rehearsal take.") if lyric_alignment else "No synchronized lyrics were tracked for this rehearsal take."
             lyric_details = lyric_alignment.get("line_details", []) if lyric_alignment else []
+            missed_words = lyric_alignment.get("missed_words", []) if lyric_alignment else []
+            word_timeline = lyric_alignment.get("word_timeline", []) if lyric_alignment else []
+            
             lyric_sample_str = ""
             if lyric_details:
                 lyric_sample_str = "\n".join([
                     f"• [{l.get('timestamp', '0:00')}] \"{l.get('line', '')}\" -> {'Sung (' + str(l.get('sync_offset_ms', 0)) + 'ms ' + str(l.get('sync_verdict', '')) + ')' if l.get('sung') else 'Missed'}"
-                    for l in lyric_details[:6]
+                    for l in lyric_details[:10]
                 ])
+
+            missed_words_str = ", ".join([m.get("word", "") for m in missed_words[:12]]) if missed_words else "None"
+            word_timeline_sample = " ".join([w.get("word", "") for w in word_timeline[:35]]) if word_timeline else ""
+
+            all_phrases = report.get("all_phrases", [])
+            phrase_timeline_str = ""
+            if all_phrases:
+                phrase_timeline_str = f"Total phrases tracked across song: {len(all_phrases)}\n"
+                for p in all_phrases[:12]:
+                    phrase_timeline_str += f"• Phrase #{p.get('phrase_id', '')} [{p.get('timestamp', '')}] ({p.get('note_span', '')}): Acc {p.get('accuracy_pct', 0)}%, Drift {p.get('cents_drift', 0):+0.1f}¢, TailSag {p.get('tail_sag_cents', 0):+0.1f}¢ -> {p.get('status', 'solid').upper()}\n"
 
             prompt += (
                 f"\n=== SINGER'S LATEST PERFORMANCE TELEMETRY ===\n"
                 f"Track: '{track_title}' {f'by {track_artist}' if track_artist else ''}\n"
                 f"[PARTITION: ACOUSTIC_CORE]\n"
                 f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
-                f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% (within ±50¢)\n"
+                f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0):.1f}% (within ±50¢)\n"
                 f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
                 f"- Attack Velocity & Scooping: {report.get('pitch_scoop_pct', 0)}% scooped attacks ({report.get('attack_velocity_verdict', 'Clean')})\n"
                 f"- Rhythm / Timing Pocket: {rhythm_ms:+0.1f} ms onset latency ({rhythm_verdict})\n"
                 f"- Resonance Ring (Singer's Formant): {report.get('resonance_verdict', 'Balanced')} (ratio: {report.get('singers_formant_ratio', 0)})\n"
-                f"- Diaphragmatic Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', 'Stable')})\n"
+                f"- Diaphragmatic Breath Support: {report.get('breath_support_pct', 0):.0f}% ({report.get('breath_support_verdict', 'Stable')})\n"
                 f"- Phonation Onset Attacks: {report.get('onset_attack_verdict', 'Balanced')}\n"
                 f"- Vibrato: {vib_str} (Bloom Style: {report.get('vibrato_style_verdict', 'Natural')})\n"
-                f"- Dynamic Story Arc: {report.get('dynamic_contrast_db', 0)} dB contrast ({report.get('dynamic_arc_verdict', 'Natural')})\n"
-                f"- Dynamics Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', 'Balanced')})\n"
+                f"- Dynamic Story Arc: {report.get('dynamic_contrast_db', 0):.1f} dB contrast ({report.get('dynamic_arc_verdict', 'Natural')})\n"
+                f"- Dynamics Steadiness: {report.get('energy_steadiness_pct', 0):.0f}% ({report.get('dynamics_verdict', 'Balanced')})\n"
                 f"- Vocal Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')} ({report.get('take_range_semitones', 0)} semitones)\n"
                 f"- Key Shift: {report.get('current_key_shift', 0):+d} semitones (Recommended: {report.get('recommended_key_shift', 0):+d})\n"
                 f"\nKey Take Observations:\n{feedback_str}\n"
                 f"\n[PARTITION: PHRASE_TIMELINE]\n"
                 f"Highlights:\n{h_str}\n"
                 f"Focus Moments:\n{s_str}\n"
+                f"{phrase_timeline_str}"
                 f"\n[PARTITION: LYRICS_ALIGNMENT]\n"
                 f"Status: {lyric_status}\n"
                 f"Summary: {lyric_summary}\n"
+                f"- Word Accuracy: {lyric_alignment.get('word_accuracy_pct', 0):.1f}% (WER: {lyric_alignment.get('word_error_rate_pct', 0):.1f}%)\n"
+                f"- Target Words Sung: {lyric_alignment.get('words_matched_count', 0)}/{lyric_alignment.get('total_target_words', 0)}\n"
+                f"- Missed Words: {missed_words_str}\n"
+                f"{f'- Transcribed Words Sample: \"{word_timeline_sample}...\"' + chr(10) if word_timeline_sample else ''}"
                 f"{f'Tracked Lines Sample:' + chr(10) + lyric_sample_str + chr(10) if lyric_sample_str else ''}"
                 f"\nCRITICAL GROUNDING DIRECTIVE:\n"
                 f"1. When the user asks about lyrics, words, or song phrasing, ground your answer strictly in [PARTITION: LYRICS_ALIGNMENT]. Quote the exact target and sung words.\n"
-                f"2. If [PARTITION: LYRICS_ALIGNMENT] status is 'unavailable' or 'reference_only', explicitly tell the user that lyric transcription was not active for this rehearsal take, and NEVER guess lyrics from pitch or tone!\n"
+                f"2. If [PARTITION: LYRICS_ALIGNMENT] status is 'transcribed_take_only', tell the user what words were transcribed from their take and provide feedback on their phrasing.\n"
+                f"3. If [PARTITION: LYRICS_ALIGNMENT] status is 'unavailable', tell the user lyric transcription was not active for this rehearsal take, and NEVER guess lyrics from pitch or tone!\n"
             )
 
         if debrief_text:

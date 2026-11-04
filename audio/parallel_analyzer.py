@@ -1,12 +1,13 @@
 """
 Tiki Rehearsal Lounge - Adaptive Parallel Vocal Take Analyzer
 =============================================================
-Distributes DSP feature extraction and lyric alignment across concurrent worker tasks.
+Distributes DSP feature extraction and lyric alignment across concurrent OS worker processes.
 Adapts dynamically to hardware:
-- Low-end dual-core machines (e.g. Intel Celeron): restricts worker concurrency to 1-2
+- Low-end dual-core machines (e.g. Intel Celeron): restricts worker concurrency to 1
   to ensure the GUI and audio stream never stutter.
-- Multi-core workstations (e.g. 24-27 cores): saturates all cores simultaneously.
-- Thread-safe work queuing via concurrent.futures with real-time UI progress updates.
+- Multi-core workstations (e.g. 24-27 cores): saturates all cores simultaneously using ProcessPoolExecutor.
+- Robust exception handling with automatic fallback to thread/in-process execution.
+- Generates deep, high-resolution phrase timelines and acoustic time-series telemetry.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import sys
 import time
 import concurrent.futures
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, Callable
+from typing import Dict, Any, Optional, Tuple, Callable, List
 
 import numpy as np
 
@@ -50,6 +51,258 @@ def get_optimal_worker_count() -> int:
         return min(total_cores - 3, 24)
 
 
+# ==============================================================================
+# Top-Level Picklable Worker Functions for Multi-Core ProcessPoolExecutor
+# ==============================================================================
+
+def _worker_pitch_chunk(args: Tuple[int, np.ndarray, int, float, float, float, float]) -> Tuple[int, np.ndarray, np.ndarray]:
+    """Computes normalized autocorrelation pitch contour for a slice of audio in a separate OS process."""
+    chunk_idx, slice_audio, sr, frame_ms, hop_ms, thresh, time_offset = args
+    times, pitches = extract_pitch_contour(
+        slice_audio,
+        sr,
+        frame_size_ms=frame_ms,
+        hop_size_ms=hop_ms,
+        voicing_threshold=thresh
+    )
+    return chunk_idx, times + time_offset, pitches
+
+
+def _worker_vibrato(s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_vibrato(s_pitches, hop_ms)
+
+
+def _worker_resonance(singer_audio: np.ndarray, sr: int, s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_resonance(singer_audio, sr, s_pitches, hop_ms)
+
+
+def _worker_breath(s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_breath_support(s_pitches, hop_ms)
+
+
+def _worker_attacks(singer_audio: np.ndarray, sr: int, s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_glottal_attacks(singer_audio, sr, s_pitches, hop_ms)
+
+
+def _worker_dynamics(singer_audio: np.ndarray, sr: int, s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_dynamics(singer_audio, sr, s_pitches, hop_ms)
+
+
+def _worker_sibilance(singer_audio: np.ndarray, sr: int, s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_sibilance(singer_audio, sr, s_pitches, hop_ms)
+
+
+def _worker_fry(singer_audio: np.ndarray, sr: int, s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_vocal_fry(singer_audio, sr, s_pitches, hop_ms)
+
+
+def _worker_scoop(s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_attack_velocity_and_scoop(s_pitches, hop_ms)
+
+
+def _worker_dynamic_arc(singer_audio: np.ndarray, sr: int, s_pitches: np.ndarray, hop_ms: float = 15.0):
+    analyzer = VocalTakeAnalyzer()
+    return analyzer._analyze_dynamic_arc(singer_audio, sr, s_pitches, hop_ms)
+
+
+def _worker_phrase_timeline(
+    singer_audio: np.ndarray,
+    sr: int,
+    s_times: np.ndarray,
+    s_pitches: np.ndarray,
+    ref_pitches: Optional[np.ndarray] = None,
+    hop_ms: float = 15.0
+):
+    """
+    Extracts high-resolution phrase breakdown:
+    - Top highlights & struggle focus moments.
+    - Full chronological timeline of every phrase across the entire song.
+    """
+    analyzer = VocalTakeAnalyzer()
+    highlights, struggles = analyzer._extract_phrase_breakdown(
+        singer_audio=singer_audio,
+        sr=sr,
+        s_times=s_times,
+        s_pitches=s_pitches,
+        ref_pitches=ref_pitches,
+        hop_ms=hop_ms
+    )
+    all_phrases = _extract_all_phrases_chronological(
+        singer_audio=singer_audio,
+        sr=sr,
+        s_times=s_times,
+        s_pitches=s_pitches,
+        ref_pitches=ref_pitches,
+        highlights=highlights,
+        struggles=struggles
+    )
+    return highlights, struggles, all_phrases
+
+
+def _worker_lyrics(
+    singer_wav_str: Optional[str],
+    singer_audio: np.ndarray,
+    sr: int,
+    s_times: np.ndarray,
+    s_pitches: np.ndarray,
+    lyric_track_dict: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Runs singer take STT and lyric alignment in a worker process."""
+    lm = LyricManager()
+    lt = LyricTrack.from_dict(lyric_track_dict) if lyric_track_dict else None
+    wav_p = Path(singer_wav_str) if singer_wav_str else None
+    rep = lm.align_singer_take(
+        singer_audio=singer_audio,
+        sr=sr,
+        s_times=s_times,
+        s_pitches=s_pitches,
+        lyric_track=lt,
+        singer_wav=wav_p
+    )
+    return rep.to_dict()
+
+
+def _extract_all_phrases_chronological(
+    singer_audio: np.ndarray,
+    sr: int,
+    s_times: np.ndarray,
+    s_pitches: np.ndarray,
+    ref_pitches: Optional[np.ndarray],
+    highlights: List[Dict[str, Any]],
+    struggles: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Segments every musical phrase across the entire track for granular coach evaluation."""
+    n_frames = len(s_pitches)
+    if n_frames < 30:
+        return []
+
+    phrases_raw = []
+    phrase_start = None
+    gap_count = 0
+    last_voiced_idx = 0
+
+    for i in range(n_frames):
+        if s_pitches[i] > 0:
+            if phrase_start is None:
+                phrase_start = i
+            last_voiced_idx = i
+            gap_count = 0
+            if (i - phrase_start) >= 600:  # ~9 seconds max phrase duration
+                if (last_voiced_idx - phrase_start) >= 30:
+                    phrases_raw.append((phrase_start, last_voiced_idx))
+                phrase_start = None
+        else:
+            if phrase_start is not None:
+                gap_count += 1
+                if gap_count >= 12:  # ~180ms breath boundary
+                    if (last_voiced_idx - phrase_start) >= 30:
+                        phrases_raw.append((phrase_start, last_voiced_idx))
+                    phrase_start = None
+                    gap_count = 0
+
+    if phrase_start is not None and (last_voiced_idx - phrase_start) >= 30:
+        phrases_raw.append((phrase_start, last_voiced_idx))
+
+    highlight_ts = {h.get("timestamp") for h in highlights}
+    struggle_ts = {s.get("timestamp") for s in struggles}
+
+    all_phrases = []
+    phrase_id = 0
+
+    for start_idx, end_idx in phrases_raw:
+        sub_pitches = s_pitches[start_idx:end_idx + 1]
+        voiced_mask = sub_pitches > 0
+        voiced_pitches = sub_pitches[voiced_mask]
+        if len(voiced_pitches) < 20:
+            continue
+
+        start_t = float(s_times[start_idx])
+        end_t = float(s_times[end_idx])
+        dur = end_t - start_t
+        if dur < 1.0:
+            continue
+
+        phrase_id += 1
+        sm, ss = int(start_t // 60), int(start_t % 60)
+        em, es = int(end_t // 60), int(end_t % 60)
+        if sm == em and ss == es:
+            es = min(59, ss + 1)
+        ts_str = f"{sm}:{ss:02d} – {em}:{es:02d}"
+
+        midis = [hz_to_midi(p) for p in voiced_pitches]
+        min_m, max_m = min(midis), max(midis)
+        min_name = midi_to_note_name(round(min_m))
+        max_name = midi_to_note_name(round(max_m))
+        note_span = f"{min_name} – {max_name}" if min_name != max_name else min_name
+
+        cents_errs = []
+        if ref_pitches is not None and len(ref_pitches) > end_idx:
+            for idx in range(start_idx, end_idx + 1):
+                if s_pitches[idx] > 0 and ref_pitches[idx] > 0:
+                    cents_errs.append(1200.0 * np.log2(s_pitches[idx] / ref_pitches[idx]))
+
+        if not cents_errs:
+            for m in midis:
+                cents_errs.append((m - round(m)) * 100.0)
+
+        cents_arr = np.array(cents_errs)
+        acc_pct = float(np.sum(np.abs(cents_arr) <= 40.0) / len(cents_arr)) * 100.0
+        med_cents = float(np.median(cents_arr))
+
+        # Tail pitch sag
+        tail_slice = voiced_pitches[-min(10, len(voiced_pitches)):]
+        body_slice = voiced_pitches[int(len(voiced_pitches) * 0.2):int(len(voiced_pitches) * 0.8)]
+        if len(body_slice) > 0 and len(tail_slice) > 0:
+            tail_sag = float(1200.0 * np.log2(float(np.median(tail_slice)) / (float(np.median(body_slice)) + 1e-9)))
+        else:
+            tail_sag = 0.0
+
+        # Local Singer's Formant power ratio
+        a_start = int(start_t * sr)
+        a_end = min(len(singer_audio), int(end_t * sr))
+        local_sf = 0.35
+        if a_end - a_start > sr * 0.3:
+            chunk = singer_audio[a_start:a_end]
+            n_fft = min(2048, len(chunk))
+            spec = np.abs(np.fft.rfft(chunk[:n_fft] * np.hanning(n_fft))) ** 2
+            freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+            sf_p = np.sum(spec[(freqs >= 2500) & (freqs <= 3500)])
+            mid_p = np.sum(spec[(freqs >= 1000) & (freqs <= 2000)])
+            local_sf = float(sf_p / (mid_p + 1e-9))
+
+        status = "highlight" if ts_str in highlight_ts else ("struggle" if ts_str in struggle_ts else "solid")
+        coaching_tip = (
+            "Locked pitch center with strong core resonance." if status == "highlight" else
+            ("Support diaphragmatic airflow through the final release." if tail_sag < -35.0 else
+             ("Aim for direct attack without scooping." if abs(med_cents) > 15.0 else "Solid melodic phrase delivery."))
+        )
+
+        all_phrases.append({
+            "phrase_id": phrase_id,
+            "timestamp": ts_str,
+            "start_s": round(start_t, 2),
+            "end_s": round(end_t, 2),
+            "duration_s": round(dur, 2),
+            "note_span": note_span,
+            "accuracy_pct": round(acc_pct, 1),
+            "cents_drift": round(med_cents, 1),
+            "tail_sag_cents": round(tail_sag, 1),
+            "singers_formant": round(local_sf, 3),
+            "status": status,
+            "coaching_tip": coaching_tip
+        })
+
+    return all_phrases
+
+
 class ParallelVocalTakeAnalyzer:
     """
     Concurrent wrapper around VocalTakeAnalyzer that fans out DSP feature extraction
@@ -70,6 +323,52 @@ class ParallelVocalTakeAnalyzer:
     def extract_song_melody_profile(self, audio_path: Path) -> Dict[str, Any]:
         return self.analyzer.extract_song_melody_profile(audio_path)
 
+    def _extract_pitch_parallel(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        progress_cb: Optional[Callable[[float, str], None]] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extracts pitch contour across multiple OS processes by slicing audio into parallel chunks.
+        Saturates all CPU cores during fundamental frequency detection.
+        """
+        duration_s = len(audio) / sr
+        # Slicing is efficient when audio is > 6 seconds and we have >= 2 workers
+        if duration_s < 6.0 or self.max_workers <= 1:
+            return extract_pitch_contour(audio, sr, voicing_threshold=0.35)
+
+        num_chunks = min(self.max_workers, 16)
+        samples_per_chunk = int(len(audio) // num_chunks)
+        overlap_samples = int(sr * 0.040)  # 40ms overlap for frame continuity
+
+        chunk_tasks = []
+        for i in range(num_chunks):
+            start_samp = i * samples_per_chunk
+            end_samp = len(audio) if i == num_chunks - 1 else min(len(audio), (i + 1) * samples_per_chunk + overlap_samples)
+            slice_audio = audio[start_samp:end_samp]
+            time_offset = start_samp / sr
+            chunk_tasks.append((i, slice_audio, sr, 40.0, 15.0, 0.35, time_offset))
+
+        chunk_results: List[Tuple[int, np.ndarray, np.ndarray]] = []
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=min(self.max_workers, num_chunks)) as executor:
+                for res in executor.map(_worker_pitch_chunk, chunk_tasks):
+                    chunk_results.append(res)
+        except Exception as e:
+            # Fallback to sequential pitch contour if process pool is restricted in current environment
+            print(f"[ParallelAnalyzer] ProcessPool pitch extraction fallback to sequential: {e}", file=sys.stderr)
+            return extract_pitch_contour(audio, sr, voicing_threshold=0.35)
+
+        chunk_results.sort(key=lambda r: r[0])
+        all_times = [r[1] for r in chunk_results if len(r[1]) > 0]
+        all_pitches = [r[2] for r in chunk_results if len(r[2]) > 0]
+
+        if not all_times:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+
+        return np.concatenate(all_times), np.concatenate(all_pitches)
+
     def analyze_take_parallel(
         self,
         singer_wav: Path,
@@ -81,15 +380,15 @@ class ParallelVocalTakeAnalyzer:
     ) -> Tuple[TakeAnalysisReport, LyricAlignmentReport]:
         """
         Executes take analysis concurrently:
-        1. Loads audio and extracts vocal pitch contour & suppresses bleed.
-        2. Spawns concurrent worker tasks for all DSP feature extractors and lyric alignment.
-        3. Aggregates results into TakeAnalysisReport and LyricAlignmentReport.
+        1. Loads audio and extracts vocal pitch contour across parallel CPU cores.
+        2. Spawns concurrent OS worker processes for all DSP feature extractors and lyric alignment.
+        3. Aggregates results into high-resolution TakeAnalysisReport and LyricAlignmentReport.
         """
         if progress_cb:
-            progress_cb(0.10, "Loading audio and extracting vocal pitch contour...")
+            progress_cb(0.08, f"Saturating {self.max_workers} CPU cores: extracting pitch contour...")
 
         singer_audio, sr = read_wav_mono(singer_wav)
-        s_times, s_pitches = extract_pitch_contour(singer_audio, sr, voicing_threshold=0.35)
+        s_times, s_pitches = self._extract_pitch_parallel(singer_audio, sr, progress_cb=progress_cb)
 
         # 0. Suppress acoustic speaker bleed if playback audio is provided
         if playback_audio_path and Path(playback_audio_path).exists():
@@ -157,7 +456,7 @@ class ParallelVocalTakeAnalyzer:
             return empty_report, empty_lyric_report
 
         if progress_cb:
-            progress_cb(0.25, f"Distributing analysis across {self.max_workers} concurrent workers...")
+            progress_cb(0.25, f"Distributing DSP analysis across {self.max_workers} worker processes...")
 
         # Singer vocal range
         take_min_hz = float(np.percentile(s_voiced, 5))
@@ -193,54 +492,79 @@ class ParallelVocalTakeAnalyzer:
         else:
             rhythm_verdict = f"Dragging (+{int(rhythm_ms)}ms)"
 
-        # 2. Fan-out independent DSP feature extractors to concurrent worker pool
+        # 2. Fan-out independent DSP feature extractors to ProcessPoolExecutor
         hop_ms = 15.0
         results: Dict[str, Any] = {}
         completed_tasks = 0
         total_tasks = 11
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_key = {
-                executor.submit(self.analyzer._analyze_vibrato, s_pitches, hop_ms): "vibrato",
-                executor.submit(self.analyzer._analyze_resonance, singer_audio, sr, s_pitches, hop_ms): "resonance",
-                executor.submit(self.analyzer._analyze_breath_support, s_pitches, hop_ms): "breath",
-                executor.submit(self.analyzer._analyze_glottal_attacks, singer_audio, sr, s_pitches, hop_ms): "attacks",
-                executor.submit(self.analyzer._analyze_dynamics, singer_audio, sr, s_pitches, hop_ms): "dynamics",
-                executor.submit(self.analyzer._analyze_sibilance, singer_audio, sr, s_pitches, hop_ms): "sibilance",
-                executor.submit(self.analyzer._analyze_vocal_fry, singer_audio, sr, s_pitches, hop_ms): "fry",
-                executor.submit(self.analyzer._analyze_attack_velocity_and_scoop, s_pitches, hop_ms): "scoop",
-                executor.submit(self.analyzer._analyze_dynamic_arc, singer_audio, sr, s_pitches, hop_ms): "dynamic_arc",
-                executor.submit(
-                    self.analyzer._extract_phrase_breakdown,
-                    singer_audio=singer_audio,
-                    sr=sr,
-                    s_times=s_times,
-                    s_pitches=s_pitches,
-                    ref_pitches=ref_pitches,
-                    hop_ms=hop_ms
-                ): "phrases",
-                executor.submit(
-                    self.lyric_manager.align_singer_take,
-                    singer_audio=singer_audio,
-                    sr=sr,
-                    s_times=s_times,
-                    s_pitches=s_pitches,
-                    lyric_track=lyric_track
-                ): "lyrics"
-            }
+        lt_dict = lyric_track.to_dict() if lyric_track else None
+        wav_str = str(singer_wav) if singer_wav else None
 
-            for future in concurrent.futures.as_completed(future_to_key):
-                key = future_to_key[future]
-                completed_tasks += 1
-                try:
-                    results[key] = future.result()
-                except Exception as e:
-                    print(f"[ParallelAnalyzer] Error in task '{key}': {e}", file=sys.stderr)
-                    results[key] = None
+        # Attempt multi-process execution first to utilize all CPU cores
+        use_process_pool = True
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_key = {
+                    executor.submit(_worker_vibrato, s_pitches, hop_ms): "vibrato",
+                    executor.submit(_worker_resonance, singer_audio, sr, s_pitches, hop_ms): "resonance",
+                    executor.submit(_worker_breath, s_pitches, hop_ms): "breath",
+                    executor.submit(_worker_attacks, singer_audio, sr, s_pitches, hop_ms): "attacks",
+                    executor.submit(_worker_dynamics, singer_audio, sr, s_pitches, hop_ms): "dynamics",
+                    executor.submit(_worker_sibilance, singer_audio, sr, s_pitches, hop_ms): "sibilance",
+                    executor.submit(_worker_fry, singer_audio, sr, s_pitches, hop_ms): "fry",
+                    executor.submit(_worker_scoop, s_pitches, hop_ms): "scoop",
+                    executor.submit(_worker_dynamic_arc, singer_audio, sr, s_pitches, hop_ms): "dynamic_arc",
+                    executor.submit(_worker_phrase_timeline, singer_audio, sr, s_times, s_pitches, ref_pitches, hop_ms): "phrases",
+                    executor.submit(_worker_lyrics, wav_str, singer_audio, sr, s_times, s_pitches, lt_dict): "lyrics"
+                }
 
-                if progress_cb:
-                    prog = 0.35 + (completed_tasks / total_tasks) * 0.55
-                    progress_cb(prog, f"Concurrent analysis: completed {key} ({completed_tasks}/{total_tasks})...")
+                for future in concurrent.futures.as_completed(future_to_key):
+                    key = future_to_key[future]
+                    completed_tasks += 1
+                    try:
+                        results[key] = future.result()
+                    except Exception as e:
+                        print(f"[ParallelAnalyzer] Process worker error in '{key}': {e}", file=sys.stderr)
+                        results[key] = None
+
+                    if progress_cb:
+                        prog = 0.35 + (completed_tasks / total_tasks) * 0.55
+                        progress_cb(prog, f"Multi-core analysis: completed {key} ({completed_tasks}/{total_tasks})...")
+        except Exception as pe:
+            print(f"[ParallelAnalyzer] ProcessPool fallback to ThreadPool: {pe}", file=sys.stderr)
+            use_process_pool = False
+
+        # Fallback if process pool broke
+        if not use_process_pool or len(results) < 5:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_key = {
+                    executor.submit(self.analyzer._analyze_vibrato, s_pitches, hop_ms): "vibrato",
+                    executor.submit(self.analyzer._analyze_resonance, singer_audio, sr, s_pitches, hop_ms): "resonance",
+                    executor.submit(self.analyzer._analyze_breath_support, s_pitches, hop_ms): "breath",
+                    executor.submit(self.analyzer._analyze_glottal_attacks, singer_audio, sr, s_pitches, hop_ms): "attacks",
+                    executor.submit(self.analyzer._analyze_dynamics, singer_audio, sr, s_pitches, hop_ms): "dynamics",
+                    executor.submit(self.analyzer._analyze_sibilance, singer_audio, sr, s_pitches, hop_ms): "sibilance",
+                    executor.submit(self.analyzer._analyze_vocal_fry, singer_audio, sr, s_pitches, hop_ms): "fry",
+                    executor.submit(self.analyzer._analyze_attack_velocity_and_scoop, s_pitches, hop_ms): "scoop",
+                    executor.submit(self.analyzer._analyze_dynamic_arc, singer_audio, sr, s_pitches, hop_ms): "dynamic_arc",
+                    executor.submit(_worker_phrase_timeline, singer_audio, sr, s_times, s_pitches, ref_pitches, hop_ms): "phrases",
+                    executor.submit(
+                        self.lyric_manager.align_singer_take,
+                        singer_audio=singer_audio,
+                        sr=sr,
+                        s_times=s_times,
+                        s_pitches=s_pitches,
+                        lyric_track=lyric_track,
+                        singer_wav=singer_wav
+                    ): "lyrics"
+                }
+                for future in concurrent.futures.as_completed(future_to_key):
+                    key = future_to_key[future]
+                    try:
+                        results[key] = future.result()
+                    except Exception as e:
+                        results[key] = None
 
         # Unpack concurrent task results with safe fallbacks
         vib_rate, vib_depth, vib_present = results.get("vibrato") or (0.0, 0.0, False)
@@ -252,8 +576,39 @@ class ParallelVocalTakeAnalyzer:
         fry_pct, fry_verdict = results.get("fry") or (0.0, "Low")
         pitch_scoop_pct, attack_velocity_verdict = results.get("scoop") or (0.0, "Clean Direct Attacks")
         dynamic_contrast_db, dynamic_arc_verdict = results.get("dynamic_arc") or (10.0, "Natural Dynamic Arc")
-        phrase_highlights, phrase_struggles = results.get("phrases") or ([], [])
-        lyric_alignment = results.get("lyrics") or LyricAlignmentReport(status="unavailable")
+
+        phrases_res = results.get("phrases")
+        if phrases_res and len(phrases_res) == 3:
+            phrase_highlights, phrase_struggles, all_phrases = phrases_res
+        elif phrases_res and len(phrases_res) == 2:
+            phrase_highlights, phrase_struggles = phrases_res
+            all_phrases = []
+        else:
+            phrase_highlights, phrase_struggles, all_phrases = [], [], []
+
+        lyrics_raw = results.get("lyrics")
+        if isinstance(lyrics_raw, dict):
+            lyric_alignment = LyricAlignmentReport(
+                status=lyrics_raw.get("status", "unavailable"),
+                word_accuracy_pct=lyrics_raw.get("word_accuracy_pct", 0.0),
+                word_error_rate_pct=lyrics_raw.get("word_error_rate_pct", 0.0),
+                total_lines=lyrics_raw.get("total_lines", 0),
+                lines_covered=lyrics_raw.get("lines_covered", 0),
+                timing_offset_ms=lyrics_raw.get("timing_offset_ms", 0.0),
+                line_details=lyrics_raw.get("line_details", []),
+                missed_phrases=lyrics_raw.get("missed_phrases", []),
+                summary_text=lyrics_raw.get("summary_text", ""),
+                total_target_words=lyrics_raw.get("total_target_words", 0),
+                total_sung_words=lyrics_raw.get("total_sung_words", 0),
+                words_matched_count=lyrics_raw.get("words_matched_count", 0),
+                missed_words=lyrics_raw.get("missed_words", []),
+                word_timeline=lyrics_raw.get("word_timeline", []),
+                diction_clarity_pct=lyrics_raw.get("diction_clarity_pct", 0.0)
+            )
+        elif isinstance(lyrics_raw, LyricAlignmentReport):
+            lyric_alignment = lyrics_raw
+        else:
+            lyric_alignment = LyricAlignmentReport(status="unavailable")
 
         # Vibrato bloom (depends on vib_present)
         vibrato_bloom_ms, vibrato_style_verdict = self.analyzer._analyze_vibrato_bloom(
@@ -277,6 +632,15 @@ class ParallelVocalTakeAnalyzer:
             (balanced_onsets_pct * 0.10)
         )
         overall_score = int(round(max(0.0, min(100.0, score_calc))))
+
+        # High-Resolution Telemetry Series & Registers
+        timeline_series, vocal_registers, intonation_bias = self._compute_high_resolution_telemetry(
+            singer_audio=singer_audio,
+            sr=sr,
+            s_times=s_times,
+            s_pitches=s_pitches,
+            ref_pitches=ref_pitches
+        )
 
         # Actionable feedback generation
         feedback = []
@@ -304,7 +668,7 @@ class ParallelVocalTakeAnalyzer:
             feedback.append(f"Expressive dynamic contrast detected ({dynamic_contrast_db:.1f} dB); strong storytelling arc.")
 
         if lyric_alignment.status == "aligned" and lyric_alignment.word_accuracy_pct < 80.0:
-            feedback.append(f"Missed {len(lyric_alignment.missed_phrases)} lyric line entries. Practice line cue timings.")
+            feedback.append(f"Lyric alignment accuracy: {lyric_alignment.word_accuracy_pct:.0f}%. Practice target phrase cue entries.")
 
         if progress_cb:
             progress_cb(1.00, "Vocal take analysis complete!")
@@ -340,12 +704,132 @@ class ParallelVocalTakeAnalyzer:
             coach_feedback=feedback,
             phrase_highlights=phrase_highlights,
             phrase_struggles=phrase_struggles,
+            all_phrases=all_phrases,
             pitch_scoop_pct=pitch_scoop_pct,
             attack_velocity_verdict=attack_velocity_verdict,
             dynamic_contrast_db=dynamic_contrast_db,
             dynamic_arc_verdict=dynamic_arc_verdict,
             vibrato_bloom_ms=vibrato_bloom_ms,
-            vibrato_style_verdict=vibrato_style_verdict
+            vibrato_style_verdict=vibrato_style_verdict,
+            timeline_series=timeline_series,
+            vocal_registers=vocal_registers,
+            intonation_bias=intonation_bias
         )
 
         return report, lyric_alignment
+
+    def _compute_high_resolution_telemetry(
+        self,
+        singer_audio: np.ndarray,
+        sr: int,
+        s_times: np.ndarray,
+        s_pitches: np.ndarray,
+        ref_pitches: Optional[np.ndarray] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        """Computes second-by-second curves and pitch register distribution."""
+        duration_s = int(len(singer_audio) / sr)
+        if duration_s < 1:
+            return {}, {}, {}
+
+        # 1-second interval time-series curves
+        rms_db_curve = []
+        pitch_acc_curve = []
+        inton_curve = []
+        formant_curve = []
+
+        voiced_mask = s_pitches > 0
+        voiced_pitches = s_pitches[voiced_mask]
+        note_histogram: Dict[str, int] = {}
+        chest_count = 0
+        mix_count = 0
+        head_count = 0
+
+        flat_frames = 0
+        sharp_frames = 0
+        spot_on_frames = 0
+
+        for sec in range(duration_s):
+            t_start = sec
+            t_end = sec + 1.0
+
+            # Audio RMS dB
+            samp_st = int(t_start * sr)
+            samp_en = min(len(singer_audio), int(t_end * sr))
+            chunk = singer_audio[samp_st:samp_en]
+            rms = np.sqrt(np.mean(chunk ** 2)) if len(chunk) > 0 else 0.0
+            rms_db = round(float(20.0 * np.log10(rms + 1e-6)), 1)
+            rms_db_curve.append(rms_db)
+
+            # Frame indices inside this 1s window
+            f_mask = (s_times >= t_start) & (s_times < t_end) & (s_pitches > 0)
+            sec_pitches = s_pitches[f_mask]
+
+            if len(sec_pitches) >= 5:
+                # Intonation cents & accuracy
+                cents = []
+                for p_val in sec_pitches:
+                    m = hz_to_midi(p_val)
+                    c = (m - round(m)) * 100.0
+                    cents.append(c)
+                    if c < -12.0:
+                        flat_frames += 1
+                    elif c > 12.0:
+                        sharp_frames += 1
+                    else:
+                        spot_on_frames += 1
+
+                c_arr = np.array(cents)
+                acc = float(np.sum(np.abs(c_arr) <= 40.0) / len(c_arr)) * 100.0
+                pitch_acc_curve.append(round(acc, 1))
+                inton_curve.append(round(float(np.median(c_arr)), 1))
+
+                # Local Singer's Formant
+                if len(chunk) >= 2048:
+                    spec = np.abs(np.fft.rfft(chunk[:2048] * np.hanning(2048))) ** 2
+                    freqs = np.fft.rfftfreq(2048, 1.0 / sr)
+                    sf_p = np.sum(spec[(freqs >= 2500) & (freqs <= 3500)])
+                    mid_p = np.sum(spec[(freqs >= 1000) & (freqs <= 2000)])
+                    formant_curve.append(round(float(sf_p / (mid_p + 1e-9)), 3))
+                else:
+                    formant_curve.append(0.30)
+            else:
+                pitch_acc_curve.append(0.0)
+                inton_curve.append(0.0)
+                formant_curve.append(0.0)
+
+        # Note histogram & vocal registers
+        for p in voiced_pitches:
+            m = hz_to_midi(p)
+            n_name = midi_to_note_name(round(m))
+            note_histogram[n_name] = note_histogram.get(n_name, 0) + 1
+            if m < 55.0:  # Below G3
+                chest_count += 1
+            elif m <= 67.0:  # G3 to G4
+                mix_count += 1
+            else:  # Above G4
+                head_count += 1
+
+        total_voiced = max(1, len(voiced_pitches))
+        vocal_registers = {
+            "chest_voice_pct": round((chest_count / total_voiced) * 100.0, 1),
+            "mix_voice_pct": round((mix_count / total_voiced) * 100.0, 1),
+            "head_voice_pct": round((head_count / total_voiced) * 100.0, 1),
+            "note_histogram": dict(sorted(note_histogram.items(), key=lambda item: item[1], reverse=True)[:12])
+        }
+
+        total_inton_evals = max(1, flat_frames + sharp_frames + spot_on_frames)
+        intonation_bias = {
+            "spot_on_pct": round((spot_on_frames / total_inton_evals) * 100.0, 1),
+            "flat_tendency_pct": round((flat_frames / total_inton_evals) * 100.0, 1),
+            "sharp_tendency_pct": round((sharp_frames / total_inton_evals) * 100.0, 1)
+        }
+
+        timeline_series = {
+            "step_seconds": 1.0,
+            "rms_energy_db": rms_db_curve,
+            "pitch_accuracy_curve": pitch_acc_curve,
+            "intonation_cents_curve": inton_curve,
+            "singer_formant_curve": formant_curve
+        }
+
+        return timeline_series, vocal_registers, intonation_bias

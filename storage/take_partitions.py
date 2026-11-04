@@ -67,6 +67,7 @@ def save_take_partitions(
             saved_wav_name = str(take_wav)
 
     # 2. Partition: acoustic_core.json
+    # 2. Partition: acoustic_core.json
     acoustic_core = {
         "overall_score": report.overall_score,
         "pitch_accuracy_pct": report.pitch_accuracy_pct,
@@ -101,15 +102,21 @@ def save_take_partitions(
         "current_key_shift": report.current_key_shift,
         "recommended_key_shift": report.recommended_key_shift,
         "key_recommendation_reason": report.key_recommendation_reason,
-        "coach_feedback": report.coach_feedback
+        "coach_feedback": report.coach_feedback,
+        "timeline_series": getattr(report, "timeline_series", {}),
+        "vocal_registers": getattr(report, "vocal_registers", {}),
+        "intonation_bias": getattr(report, "intonation_bias", {})
     }
     with open(take_dir / "acoustic_core.json", "w", encoding="utf-8") as f:
         json.dump(acoustic_core, f, indent=2, ensure_ascii=False)
 
     # 3. Partition: phrase_timeline.json
+    all_phrases = getattr(report, "all_phrases", []) or []
     phrase_timeline = {
         "phrase_highlights": report.phrase_highlights,
         "phrase_struggles": report.phrase_struggles,
+        "all_phrases": all_phrases,
+        "total_phrases": len(all_phrases),
         "highlights_count": len(report.phrase_highlights),
         "struggles_count": len(report.phrase_struggles)
     }
@@ -123,18 +130,32 @@ def save_take_partitions(
         lyrics_data = {
             "status": "unavailable",
             "word_accuracy_pct": 0.0,
+            "word_error_rate_pct": 0.0,
             "total_lines": 0,
             "lines_covered": 0,
             "timing_offset_ms": 0.0,
             "line_details": [],
             "missed_phrases": [],
-            "summary_text": "No lyric alignment was processed for this take."
+            "summary_text": "No lyric alignment was processed for this take.",
+            "total_target_words": 0,
+            "total_sung_words": 0,
+            "words_matched_count": 0,
+            "missed_words": [],
+            "word_timeline": [],
+            "diction_clarity_pct": 0.0
         }
     with open(take_dir / "lyrics_alignment.json", "w", encoding="utf-8") as f:
         json.dump(lyrics_data, f, indent=2, ensure_ascii=False)
 
     # 5. Partition: vocal_health_diagnostics.json
+    fatigue_score = int(round(
+        (min(100.0, report.vocal_fry_pct) * 0.40) +
+        (max(0.0, 75.0 - report.breath_support_pct) * 0.35) +
+        (max(0.0, 100.0 - report.balanced_onsets_pct) * 0.25)
+    ))
     diagnostics = {
+        "fatigue_risk_score": fatigue_score,
+        "fatigue_risk_verdict": "Low Vocal Cord Fatigue" if fatigue_score < 30 else ("Moderate Strain Detected" if fatigue_score < 60 else "High Vocal Fatigue / Rest Advised"),
         "laryngeal_tension_detected": bool(report.intonation_cents >= 18.0),
         "subglottic_pressure_decay": bool(report.breath_support_pct < 70.0 or report.intonation_cents <= -15.0),
         "pitch_scooping_frequent": bool(report.pitch_scoop_pct >= 35.0),
@@ -155,9 +176,17 @@ def save_take_partitions(
 
     # 6. Master Table of Contents (toc.json)
     lyric_status = lyrics_data.get("status", "unavailable")
-    lyric_summary = (
-        f"{lyrics_data.get('lines_covered', 0)}/{lyrics_data.get('total_lines', 0)} lines sung ({lyrics_data.get('word_accuracy_pct', 0)}%)"
-        if lyric_status == "aligned" else "Lyrics alignment not synced for this take"
+    if lyric_status == "aligned":
+        lyric_summary = f"{lyrics_data.get('words_matched_count', 0)}/{lyrics_data.get('total_target_words', 0)} words matched ({lyrics_data.get('word_accuracy_pct', 0)}%), sync {lyrics_data.get('timing_offset_ms', 0.0):+0.1f}ms"
+    elif lyric_status == "transcribed_take_only":
+        lyric_summary = f"Transcribed {lyrics_data.get('total_sung_words', 0)} words ({lyrics_data.get('diction_clarity_pct', 0)}% clarity)"
+    else:
+        lyric_summary = "Lyrics alignment not synced for this take"
+
+    phrase_count_total = len(all_phrases) if all_phrases else (len(report.phrase_highlights) + len(report.phrase_struggles))
+    phrase_summary = (
+        f"{phrase_count_total} phrases tracked ({len(report.phrase_highlights)} highlights, {len(report.phrase_struggles)} focus moments)"
+        if all_phrases else f"{len(report.phrase_highlights)} highlights, {len(report.phrase_struggles)} struggle focus moments"
     )
 
     toc = {
@@ -175,12 +204,12 @@ def save_take_partitions(
             "acoustic_core": {
                 "file": "acoustic_core.json",
                 "status": "ready",
-                "summary": f"Score {report.overall_score}/100, Pitch {report.pitch_accuracy_pct}%, Scoop {report.pitch_scoop_pct:.0f}%, Arc {report.dynamic_contrast_db:.1f} dB"
+                "summary": f"Score {report.overall_score}/100, Pitch {report.pitch_accuracy_pct:.1f}%, Scoop {report.pitch_scoop_pct:.0f}%, Arc {report.dynamic_contrast_db:.1f} dB"
             },
             "phrase_timeline": {
                 "file": "phrase_timeline.json",
                 "status": "ready",
-                "summary": f"{len(report.phrase_highlights)} highlights, {len(report.phrase_struggles)} struggle focus moments"
+                "summary": phrase_summary
             },
             "lyrics_alignment": {
                 "file": "lyrics_alignment.json",
@@ -190,7 +219,7 @@ def save_take_partitions(
             "vocal_health_diagnostics": {
                 "file": "vocal_health_diagnostics.json",
                 "status": "ready",
-                "summary": f"Drill: {diagnostics['recommended_micro_drill']} | Take #2: {diagnostics['take_2_directive']}"
+                "summary": f"Fatigue: {diagnostics['fatigue_risk_verdict']} | Drill: {diagnostics['recommended_micro_drill']}"
             }
         }
     }

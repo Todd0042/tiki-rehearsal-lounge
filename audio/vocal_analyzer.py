@@ -112,6 +112,7 @@ class TakeAnalysisReport:
     # Timestamped Phrase Breakdown
     phrase_highlights: List[Dict[str, Any]] = None
     phrase_struggles: List[Dict[str, Any]] = None
+    all_phrases: List[Dict[str, Any]] = None
 
     # Extended Performer Telemetry (Attack Velocity, Dynamic Arc, Vibrato Bloom)
     pitch_scoop_pct: float = 0.0          # % of phrase onsets that scooped up from >60¢ below
@@ -121,11 +122,24 @@ class TakeAnalysisReport:
     vibrato_bloom_ms: float = 0.0         # Latency in ms before vibrato blooms on sustained notes
     vibrato_style_verdict: str = "Natural Phonation"
 
+    # High-Resolution Telemetry Series & Registers
+    timeline_series: Dict[str, Any] = None
+    vocal_registers: Dict[str, Any] = None
+    intonation_bias: Dict[str, Any] = None
+
     def __post_init__(self):
         if self.phrase_highlights is None:
             self.phrase_highlights = []
         if self.phrase_struggles is None:
             self.phrase_struggles = []
+        if self.all_phrases is None:
+            self.all_phrases = []
+        if self.timeline_series is None:
+            self.timeline_series = {}
+        if self.vocal_registers is None:
+            self.vocal_registers = {}
+        if self.intonation_bias is None:
+            self.intonation_bias = {}
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

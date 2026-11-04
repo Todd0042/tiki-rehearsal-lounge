@@ -106,6 +106,12 @@ class TestLyricManager(unittest.TestCase):
         self.assertTrue(report.line_details[0]["sung"])
         self.assertFalse(report.line_details[2]["sung"])
 
+    def test_stt_engine_availability_and_structure(self):
+        from audio.stt_engine import is_stt_available, find_whisper_binary
+        binary = find_whisper_binary()
+        self.assertIsNotNone(binary)
+        self.assertTrue(is_stt_available())
+
 
 if __name__ == "__main__":
     unittest.main()

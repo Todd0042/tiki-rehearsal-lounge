@@ -98,6 +98,17 @@ class TestParallelAnalyzer(unittest.TestCase):
         part = load_take_partition(take_dir, "acoustic_core")
         self.assertIsNotNone(part)
         self.assertEqual(part["overall_score"], report.overall_score)
+        self.assertIn("timeline_series", part)
+        self.assertIn("vocal_registers", part)
+
+        phrase_part = load_take_partition(take_dir, "phrase_timeline")
+        self.assertIsNotNone(phrase_part)
+        self.assertIn("all_phrases", phrase_part)
+        self.assertIn("total_phrases", phrase_part)
+
+        diag_part = load_take_partition(take_dir, "vocal_health_diagnostics")
+        self.assertIsNotNone(diag_part)
+        self.assertIn("fatigue_risk_score", diag_part)
 
 
 if __name__ == "__main__":

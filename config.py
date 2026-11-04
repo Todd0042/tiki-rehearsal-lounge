@@ -38,9 +38,12 @@ TEMP_TAKES_DIR = Path(tempfile.gettempdir()) / "tiki_rehearsal_takes"
 TEMP_TAKES_DIR.mkdir(parents=True, exist_ok=True)
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
 def get_bundled_binary_path(binary_name: str) -> Optional[Path]:
     """
-    Finds a bundled binary (e.g. ffmpeg, ffprobe, mpv) in PyInstaller bundle,
+    Finds a bundled binary (e.g. ffmpeg, ffprobe, mpv, whisper-cli) in PyInstaller bundle,
     local bin/ directory, or system PATH with platform extension awareness.
     """
     ext = ".exe" if sys.platform == "win32" else ""
@@ -48,7 +51,7 @@ def get_bundled_binary_path(binary_name: str) -> Optional[Path]:
 
     # 1. Check PyInstaller _MEIPASS
     if hasattr(sys, "_MEIPASS"):
-        for sub in ["bin", "_internal/bin", ""]:
+        for sub in ["bin", "_internal/bin", "bin/whisper", "bin/whisper-win/Release", ""]:
             cand = Path(sys._MEIPASS) / sub / target_name if sub else Path(sys._MEIPASS) / target_name
             if cand.is_file():
                 return cand
@@ -56,19 +59,18 @@ def get_bundled_binary_path(binary_name: str) -> Optional[Path]:
     # 2. Check directory of running executable when frozen (one-dir or installed)
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).resolve().parent
-        for sub in ["bin", "_internal/bin", ""]:
+        for sub in ["bin", "_internal/bin", "bin/whisper", "bin/whisper-win/Release", ""]:
             cand = exe_dir / sub / target_name if sub else exe_dir / target_name
             if cand.is_file():
                 return cand
 
     # 3. Check local application bin/
-    app_root = Path(__file__).resolve().parent
-    for sub in ["bin", "usr/bin", ""]:
-        cand = app_root / sub / target_name if sub else app_root / target_name
+    for sub in ["bin", "bin/whisper", "bin/whisper-win/Release", "usr/bin", ""]:
+        cand = PROJECT_ROOT / sub / target_name if sub else PROJECT_ROOT / target_name
         if cand.is_file():
             return cand
 
-    # 3. Check system PATH
+    # 4. Check system PATH
     sys_path = shutil.which(target_name) or shutil.which(binary_name)
     if sys_path:
         return Path(sys_path)
