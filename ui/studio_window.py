@@ -60,6 +60,7 @@ from audio.calibration import (
     VocalProfile,
     hz_to_midi,
     midi_to_note_name
+)
 from audio.player import RehearsalPlayer
 from audio.vocal_analyzer import VocalTakeAnalyzer, TakeAnalysisReport
 from audio.parallel_analyzer import ParallelVocalTakeAnalyzer

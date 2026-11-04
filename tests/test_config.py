@@ -59,6 +59,11 @@ class TestStudioConfig(unittest.TestCase):
             self.assertEqual(loaded["target_lufs"], -23.0)
             self.assertEqual(loaded["video_quality_profile"], "balanced_720p")
 
+    def test_studio_window_import(self):
+        """Verifies that ui.studio_window imports without SyntaxError or missing dependencies."""
+        from ui.studio_window import StudioCockpitWindow
+        self.assertIsNotNone(StudioCockpitWindow)
+
 
 if __name__ == "__main__":
     unittest.main()
