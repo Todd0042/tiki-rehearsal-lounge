@@ -830,13 +830,27 @@ class StudioCockpitWindow:
             justify="left"
         ).pack(anchor="w", pady=(0, 8))
 
-        self.model_choice_var = tk.StringVar(value="3b")
+        self.model_choice_var = tk.StringVar(value="7b")
         opt_frame = tk.Frame(self.ai_install_card, bg="#1d0f2b")
         opt_frame.pack(fill="x", pady=(0, 8))
 
+        rb0 = tk.Radiobutton(
+            opt_frame,
+            text="Qwen 2.5 7B-Instruct (~4.68 GB) — Master-Class Studio Director (6GB+ GPU / 8-Core CPU)",
+            variable=self.model_choice_var,
+            value="7b",
+            fg=COLOR_LIME,
+            bg="#1d0f2b",
+            selectcolor="#0d0814",
+            activebackground="#1d0f2b",
+            activeforeground=COLOR_LIME,
+            font=("Helvetica", 9, "bold")
+        )
+        rb0.pack(anchor="w")
+
         rb1 = tk.Radiobutton(
             opt_frame,
-            text="Qwen 2.5 3B-Instruct (~1.95 GB) — Deep Pedagogy (Recommended)",
+            text="Qwen 2.5 3B-Instruct (~1.95 GB) — Deep Pedagogy (Recommended for mid-range GPUs/CPUs)",
             variable=self.model_choice_var,
             value="3b",
             fg=COLOR_GOLD,
@@ -850,7 +864,7 @@ class StudioCockpitWindow:
 
         rb2 = tk.Radiobutton(
             opt_frame,
-            text="Qwen 2.5 1.5B-Instruct (~986 MB) — Ultra-Fast & Compact (Sub-1 GB)",
+            text="Qwen 2.5 1.5B-Instruct (~986 MB) — Ultra-Fast & Compact (Sub-1 GB, fast on light CPUs)",
             variable=self.model_choice_var,
             value="1.5b",
             fg=COLOR_CYAN,
@@ -861,6 +875,49 @@ class StudioCockpitWindow:
             font=("Helvetica", 9)
         )
         rb2.pack(anchor="w")
+
+        accel_frame = tk.Frame(self.ai_install_card, bg="#1d0f2b")
+        accel_frame.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            accel_frame,
+            text="Inference Acceleration:",
+            font=("Helvetica", 9, "bold"),
+            fg=COLOR_GOLD,
+            bg="#1d0f2b"
+        ).pack(side="left", padx=(0, 10))
+
+        self.accel_choice_var = tk.StringVar(value=self.offline_coach.get_acceleration_mode())
+
+        rb_gpu = tk.Radiobutton(
+            accel_frame,
+            text="⚡ GPU (VRAM Offload - Recommended for Dedicated GPUs)",
+            variable=self.accel_choice_var,
+            value="gpu",
+            fg=COLOR_CYAN,
+            bg="#1d0f2b",
+            selectcolor="#0d0814",
+            activebackground="#1d0f2b",
+            activeforeground=COLOR_CYAN,
+            font=("Helvetica", 8, "bold"),
+            command=lambda: self.offline_coach.set_acceleration_mode(self.accel_choice_var.get())
+        )
+        rb_gpu.pack(side="left", padx=(0, 12))
+
+        rb_cpu = tk.Radiobutton(
+            accel_frame,
+            text="🖥️ CPU Only (Universal Compatibility)",
+            variable=self.accel_choice_var,
+            value="cpu",
+            fg=COLOR_TEXT_MAIN,
+            bg="#1d0f2b",
+            selectcolor="#0d0814",
+            activebackground="#1d0f2b",
+            activeforeground=COLOR_TEXT_MAIN,
+            font=("Helvetica", 8),
+            command=lambda: self.offline_coach.set_acceleration_mode(self.accel_choice_var.get())
+        )
+        rb_cpu.pack(side="left")
 
         btn_row = tk.Frame(self.ai_install_card, bg="#1d0f2b")
         btn_row.pack(fill="x")
@@ -2429,9 +2486,11 @@ class StudioCockpitWindow:
 
     def _refresh_ai_coach_view(self):
         installed = self.offline_coach.get_installed_model()
+        accel = self.offline_coach.get_acceleration_mode().upper()
+        accel_icon = "⚡" if accel == "GPU" else "🖥️"
         if installed:
             if hasattr(self, "lbl_ai_model_badge"):
-                self.lbl_ai_model_badge.config(text=f"⚡ Model: {installed.get('name', 'Offline')}")
+                self.lbl_ai_model_badge.config(text=f"{accel_icon} Model: {installed.get('name', 'Offline')} • {accel}")
             self.ai_install_card.pack_forget()
             self.ai_debrief_card.pack(fill="x", pady=(8, 0))
             self.conversation_card.pack(fill="x", pady=(8, 0))
@@ -2447,7 +2506,7 @@ class StudioCockpitWindow:
         if hasattr(self, "btn_header_ai"):
             if installed:
                 self.btn_header_ai.config(
-                    text=f"🤖 AI Coach ({installed.get('key', '').upper()} Active) • Manage/Uninstall",
+                    text=f"🤖 AI Coach ({installed.get('key', '').upper()} • {accel}) • Manage",
                     fg=COLOR_GOLD
                 )
             else:
@@ -2463,8 +2522,8 @@ class StudioCockpitWindow:
     def _open_manage_models_dialog(self):
         """Dedicated dialog to inspect and cleanly uninstall offline AI models (Option B)."""
         dlg = tk.Toplevel(self.root)
-        dlg.title("⚙️ Manage Offline AI Models")
-        dlg.geometry("520x370")
+        dlg.title("⚙️ Manage Offline AI Models & Acceleration")
+        dlg.geometry("540x480")
         dlg.resizable(False, False)
         dlg.configure(bg=COLOR_BG_MAIN)
         dlg.transient(self.root)
@@ -2472,8 +2531,8 @@ class StudioCockpitWindow:
 
         # Center dialog
         dlg.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 260
-        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 185
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 270
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 240
         dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
 
         # Title Header
@@ -2509,7 +2568,7 @@ class StudioCockpitWindow:
                 padx=12,
                 pady=10
             )
-            card.pack(fill="x", pady=(0, 12))
+            card.pack(fill="x", pady=(0, 10))
 
             tk.Label(
                 card,
@@ -2525,7 +2584,7 @@ class StudioCockpitWindow:
                 font=("Helvetica", 8, "italic"),
                 fg=COLOR_TEXT_MUTED,
                 bg="#1a0d2a"
-            ).pack(anchor="w", pady=(2, 6))
+            ).pack(anchor="w", pady=(2, 4))
 
             p = installed.get("path")
             size_mb = p.stat().st_size / (1024 * 1024) if p and p.exists() else 0
@@ -2553,13 +2612,82 @@ class StudioCockpitWindow:
                 font=("Helvetica", 8),
                 fg=COLOR_TEXT_MUTED,
                 bg="#1a0d2a",
-                wraplength=460,
+                wraplength=480,
                 justify="left"
             ).pack(anchor="w", pady=(2, 0))
 
+            # Hardware Acceleration Selection Card
+            accel_card = tk.LabelFrame(
+                content,
+                text=" HARDWARE ACCELERATION ",
+                bg="#1a0d2a",
+                fg=COLOR_GOLD,
+                font=("Helvetica", 9, "bold"),
+                bd=1,
+                padx=12,
+                pady=8
+            )
+            accel_card.pack(fill="x", pady=(0, 10))
+
+            dlg_accel_var = tk.StringVar(value=self.offline_coach.get_acceleration_mode())
+
+            lbl_accel_status = tk.Label(
+                accel_card,
+                text="",
+                font=("Helvetica", 8, "italic"),
+                fg=COLOR_CYAN,
+                bg="#1a0d2a"
+            )
+
+            def _on_accel_change():
+                mode = dlg_accel_var.get()
+                self.offline_coach.set_acceleration_mode(mode)
+                if hasattr(self, "accel_choice_var"):
+                    self.accel_choice_var.set(mode)
+                self._refresh_ai_coach_view()
+                lbl_accel_status.config(
+                    text=f"Active: {'⚡ GPU Acceleration (Layers offloaded: 99)' if mode == 'gpu' else '🖥️ CPU Only (Universal Threads)'}"
+                )
+
+            rb_dlg_gpu = tk.Radiobutton(
+                accel_card,
+                text="⚡ GPU Acceleration (VRAM Offload - Recommended for Dedicated GPUs)",
+                variable=dlg_accel_var,
+                value="gpu",
+                fg=COLOR_CYAN,
+                bg="#1a0d2a",
+                selectcolor="#0d0814",
+                activebackground="#1a0d2a",
+                activeforeground=COLOR_CYAN,
+                font=("Helvetica", 9, "bold"),
+                command=_on_accel_change
+            )
+            rb_dlg_gpu.pack(anchor="w")
+
+            rb_dlg_cpu = tk.Radiobutton(
+                accel_card,
+                text="🖥️ CPU Only (Universal Compatibility / Multi-threaded CPU)",
+                variable=dlg_accel_var,
+                value="cpu",
+                fg=COLOR_TEXT_MAIN,
+                bg="#1a0d2a",
+                selectcolor="#0d0814",
+                activebackground="#1a0d2a",
+                activeforeground=COLOR_TEXT_MAIN,
+                font=("Helvetica", 9),
+                command=_on_accel_change
+            )
+            rb_dlg_cpu.pack(anchor="w")
+
+            lbl_accel_status.pack(anchor="w", pady=(4, 0))
+            cur_mode = dlg_accel_var.get()
+            lbl_accel_status.config(
+                text=f"Active: {'⚡ GPU Acceleration (Layers offloaded: 99)' if cur_mode == 'gpu' else '🖥️ CPU Only (Universal Threads)'}"
+            )
+
             # Action Frame
             action_frame = tk.Frame(content, bg=COLOR_BG_MAIN)
-            action_frame.pack(fill="x", pady=8)
+            action_frame.pack(fill="x", pady=6)
 
             def _uninstall():
                 confirmed = messagebox.askyesno(
@@ -2598,7 +2726,7 @@ class StudioCockpitWindow:
         else:
             tk.Label(
                 content,
-                text="No offline AI models are currently installed.\n\nYou can download the 3B or 1.5B model anytime directly from the Rehearsal Cockpit.",
+                text="No offline AI models are currently installed.\n\nYou can download the 7B, 3B, or 1.5B model anytime directly from the Rehearsal Cockpit.",
                 font=("Helvetica", 10),
                 fg=COLOR_TEXT_MUTED,
                 bg=COLOR_BG_MAIN,

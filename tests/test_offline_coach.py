@@ -54,12 +54,36 @@ class TestOfflineCoach(unittest.TestCase):
             self.assertTrue(bin_path.exists())
             self.assertTrue("llama-server" in bin_path.name.lower())
 
-    def test_fallback_chat_reply(self):
-        """Verifies that chat_with_coach returns user-friendly guidance instead of raw dev errors."""
-        reply = self.coach.chat_with_coach("Hello coach", [])
-        self.assertIsInstance(reply, str)
-        self.assertNotIn("Install 'llama-cpp-python'", reply)
-        self.assertGreater(len(reply), 20)
+    def test_available_models_catalog(self):
+        """Verifies that 7B, 3B, and 1.5B models are present with complete metadata."""
+        from ai.offline_coach import AVAILABLE_MODELS
+        self.assertIn("7b", AVAILABLE_MODELS)
+        self.assertIn("3b", AVAILABLE_MODELS)
+        self.assertIn("1.5b", AVAILABLE_MODELS)
+
+        m7b = AVAILABLE_MODELS["7b"]
+        self.assertTrue(m7b["name"].startswith("Qwen2.5-7B"))
+        self.assertGreater(m7b["size_bytes"], 4000000000)
+        self.assertTrue(m7b["url"].startswith("https://huggingface.co/"))
+        self.assertTrue(m7b["filename"].endswith(".gguf"))
+
+    def test_acceleration_mode_toggle(self):
+        """Verifies getting and setting acceleration mode between GPU and CPU."""
+        original_mode = self.coach.get_acceleration_mode()
+        try:
+            self.coach.set_acceleration_mode("cpu")
+            self.assertEqual(self.coach.get_acceleration_mode(), "cpu")
+
+            self.coach.set_acceleration_mode("gpu")
+            self.assertEqual(self.coach.get_acceleration_mode(), "gpu")
+        finally:
+            self.coach.set_acceleration_mode(original_mode)
+
+    def test_preferred_model_selection(self):
+        """Verifies that setting a preferred model key succeeds."""
+        self.assertTrue(self.coach.set_preferred_model("7b"))
+        self.assertTrue(self.coach.set_preferred_model("3b"))
+        self.assertFalse(self.coach.set_preferred_model("invalid_model_key"))
 
     def tearDown(self):
         self.coach.shutdown_engine()

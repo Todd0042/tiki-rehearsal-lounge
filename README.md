@@ -12,7 +12,7 @@
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-00f0ff.svg)](LICENSE)
 [![Platform: Linux & Windows](https://img.shields.io/badge/Platform-Linux%20(AppImage)%20%7C%20Windows-orange.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-39ff14.svg)]()
-[![Tests: 30 Passed](https://img.shields.io/badge/Tests-30%20Passing-brightgreen.svg)]()
+[![Tests: 32 Passed](https://img.shields.io/badge/Tests-32%20Passing-brightgreen.svg)]()
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Creator-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/todd0042)
 
 > **Your personal vocal gym, pitch calibration laboratory, and post-take performance report card studio — companion to Tiki Karaoke or 100% standalone.**
@@ -52,7 +52,7 @@
 2. **🎹 Guided Warmup Studio**: Procedural multi-instrument reference tones (Piano, Rhodes, Strings, Flute, Guitar, Brass) with real-time pitch feedback to prepare your vocal folds safely.
 3. **🎵 Formant-Preserving Key Shifting**: Rehearse tracks with real-time `librubberband` key transposition without pitch chipmunking or tempo distortion.
 4. **📊 Post-Take Report Cards with Audio Bleed Cancellation**: Instant breakdown of pitch accuracy %, flat/sharp intonation drift in cents, millisecond rhythm onset timing, and natural vibrato modulation—with reference audio subtraction to prevent false high scores on silent speaker bleed.
-5. **🧠 100% Offline AI Vocal Coach & Progression Tracker**: Powered by a bundled standalone `llama.cpp` engine running local open-weights models (Qwen 2.5 1.5B or 3B) on CPU. Tracks take-over-take growth in an isolated rolling database (`rehearsal_history.db`) with zero telemetry, zero cloud calls, and zero external subscriptions.
+5. **🧠 100% Offline AI Vocal Coach & Progression Tracker**: Powered by a bundled standalone `llama.cpp` engine running local open-weights models (Qwen 2.5 7B, 3B, or 1.5B) with one-click **⚡ GPU (VRAM offload)** or **🖥️ CPU** execution. Tracks take-over-take growth in an isolated rolling database (`rehearsal_history.db`) with zero telemetry, zero cloud calls, and zero external subscriptions.
 
 ---
 
@@ -232,8 +232,10 @@ The built-in vocal coach (`ai/offline_coach.py`) operates under two complementar
    * Pre-compiled zero-dependency C++ inference server packaged directly inside the app bundle alongside `mpv` and `ffmpeg`.
    * Automatically manages a local loopback server (`http://127.0.0.1:<port>`) on an ephemeral port—requiring **zero Python compiler, MSVC, or pip installations**.
    * Downloads verified open-weights models chunk-by-chunk via **Settings (⚙️) -> Offline AI Vocal Coach**:
-     * **Qwen2.5-1.5B-Instruct (Q4_K_M)**: ~986 MB, ~60–80 tok/s on CPU (ultra-fast compact option).
-     * **Qwen2.5-3B-Instruct (Q4_K_M)**: ~1.95 GB, ~25–45 tok/s on CPU (deep vocal pedagogy & nuanced feedback).
+     * **Qwen2.5-7B-Instruct (Q4_K_M)**: ~4.68 GB, ~60–90 tok/s on GPU • ~15–25 tok/s on CPU (Master-class studio director for dedicated 6GB+ GPUs or 8-core CPUs).
+     * **Qwen2.5-3B-Instruct (Q4_K_M)**: ~1.95 GB, ~80–120 tok/s on GPU • ~25–45 tok/s on CPU (deep vocal pedagogy & musical nuance).
+     * **Qwen2.5-1.5B-Instruct (Q4_K_M)**: ~986 MB, ~150+ tok/s on GPU • ~60–80 tok/s on CPU (ultra-fast compact option).
+   * **Hardware Acceleration Selection**: Seamlessly toggle between **⚡ GPU Acceleration** (offloads up to 99 layers directly to VRAM on CUDA, Vulkan, ROCm, or Metal) and **🖥️ CPU Only** (multi-threaded CPU inference) with instant on-the-fly engine reloading.
    * Supports interactive back-and-forth chat in the Studio Cockpit with conversational context and boundary validation.
    * Delivers an automated **📈 Vocal Progression & Growth Trajectory** summary at the bottom of every debriefing report by reading historical performance deltas from `rehearsal_history.db`.
    * Never transmits audio or user data outside your local machine.

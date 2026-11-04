@@ -136,7 +136,11 @@ def load_studio_config() -> Dict[str, Any]:
     if STUDIO_CONFIG_PATH.exists():
         try:
             with open(STUDIO_CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "ai_acceleration" not in data:
+                        data["ai_acceleration"] = "gpu"
+                    return data
         except Exception as e:
             print(f"[Config] Error reading {STUDIO_CONFIG_PATH}: {e}", file=sys.stderr)
 
@@ -153,6 +157,7 @@ def load_studio_config() -> Dict[str, Any]:
             "recordings_dir": rec_dir,
             "target_lufs": float(tiki.get("target_lufs", -23.0)),
             "video_quality_profile": str(tiki.get("video_quality_profile", "pro")),
+            "ai_acceleration": "gpu",
         }
     else:
         base_dir = HOME_DIR / "Music" / "TikiRehearsalLounge"
@@ -163,6 +168,7 @@ def load_studio_config() -> Dict[str, Any]:
             "recordings_dir": str(base_dir / "recordings"),
             "target_lufs": -16.0,
             "video_quality_profile": "pro",
+            "ai_acceleration": "gpu",
         }
 
     save_studio_config(cfg)

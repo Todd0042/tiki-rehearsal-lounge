@@ -23,13 +23,27 @@ import urllib.request
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 
-from config import COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME, STUDIO_CONFIG_DIR, get_bundled_binary_path
+from config import (
+    COLOR_CYAN, COLOR_MAGENTA, COLOR_GOLD, COLOR_LIME,
+    STUDIO_CONFIG_DIR, get_bundled_binary_path,
+    load_studio_config, save_studio_config
+)
 from audio.tone_generator import transpose_note, clamp_note_to_range, parse_target_notes
 
 MODELS_DIR = STUDIO_CONFIG_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
+    "7b": {
+        "key": "7b",
+        "name": "Qwen2.5-7B-Instruct (Q4_K_M)",
+        "tagline": "Master-Class Studio Director (6GB+ GPU / 8-Core CPU)",
+        "filename": "qwen2.5-7b-instruct-q4_k_m.gguf",
+        "size_str": "~4.68 GB",
+        "size_bytes": 4683074240,
+        "speed": "~60–90 tok/s on GPU • ~15–25 tok/s on CPU",
+        "url": "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    },
     "3b": {
         "key": "3b",
         "name": "Qwen2.5-3B-Instruct (Q4_K_M)",
@@ -37,7 +51,7 @@ AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
         "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
         "size_str": "~1.95 GB",
         "size_bytes": 2085000000,
-        "speed": "~30–45 tok/s on CPU",
+        "speed": "~80–120 tok/s on GPU • ~30–45 tok/s on CPU",
         "url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
     },
     "1.5b": {
@@ -47,7 +61,7 @@ AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
         "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
         "size_str": "~986 MB",
         "size_bytes": 986000000,
-        "speed": "~60–80 tok/s on CPU",
+        "speed": "~150+ tok/s on GPU • ~60–80 tok/s on CPU",
         "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
     }
 }
@@ -68,14 +82,55 @@ class OfflineVocalCoach:
         self.models_dir = MODELS_DIR
         self._llm = None
         self._loaded_model_key: Optional[str] = None
+        self._loaded_acceleration: Optional[str] = None
         self._load_lock = threading.Lock()
         self._server_proc: Optional[subprocess.Popen] = None
         self._server_port: Optional[int] = None
         self._server_url: Optional[str] = None
         atexit.register(self.shutdown_engine)
 
+    def get_acceleration_mode(self) -> str:
+        """Returns 'gpu' or 'cpu' from studio config (defaults to 'gpu')."""
+        cfg = load_studio_config()
+        mode = cfg.get("ai_acceleration", "gpu").lower()
+        return "gpu" if mode in ("gpu", "cuda", "vulkan", "rocm", "metal") else "cpu"
+
+    def set_acceleration_mode(self, mode: str) -> bool:
+        """Sets acceleration mode ('gpu' or 'cpu'), saves to config, and reloads engine if changed."""
+        mode = "gpu" if str(mode).lower() in ("gpu", "cuda", "vulkan", "rocm", "metal") else "cpu"
+        cfg = load_studio_config()
+        if cfg.get("ai_acceleration") == mode and self._loaded_acceleration == mode and self.is_engine_ready():
+            return True
+        cfg["ai_acceleration"] = mode
+        save_studio_config(cfg)
+        # If engine is currently loaded or running, restart it with new acceleration setting
+        if self._server_proc is not None or self._llm is not None:
+            self.shutdown_engine()
+            return self.load_engine()
+        return True
+
+    def set_preferred_model(self, model_key: str) -> bool:
+        """Sets preferred model key in studio config and reloads engine if needed."""
+        if model_key not in AVAILABLE_MODELS:
+            return False
+        cfg = load_studio_config()
+        cfg["ai_model_key"] = model_key
+        save_studio_config(cfg)
+        if self._loaded_model_key != model_key and self.is_engine_ready():
+            self.shutdown_engine()
+            return self.load_engine()
+        return True
+
     def get_installed_model(self) -> Optional[Dict[str, Any]]:
         """Returns metadata of currently installed model, if any."""
+        cfg = load_studio_config()
+        preferred_key = cfg.get("ai_model_key")
+        if preferred_key and preferred_key in AVAILABLE_MODELS:
+            meta = AVAILABLE_MODELS[preferred_key]
+            p = self.models_dir / meta["filename"]
+            if p.exists() and p.stat().st_size > (meta["size_bytes"] * 0.85):
+                return {**meta, "path": p}
+
         for key, meta in AVAILABLE_MODELS.items():
             p = self.models_dir / meta["filename"]
             if p.exists() and p.stat().st_size > (meta["size_bytes"] * 0.85):
@@ -101,6 +156,7 @@ class OfflineVocalCoach:
                 self._server_port = None
                 self._server_url = None
                 self._loaded_model_key = None
+                self._loaded_acceleration = None
             self._llm = None
 
     def uninstall_model(self, model_key: Optional[str] = None) -> bool:
@@ -178,6 +234,11 @@ class OfflineVocalCoach:
             if tmp_file.exists():
                 tmp_file.rename(target_file)
 
+            # Record preferred model in studio config
+            cfg = load_studio_config()
+            cfg["ai_model_key"] = model_key
+            save_studio_config(cfg)
+
             if progress_cb:
                 progress_cb(1.0, f"Installed {meta['name']} successfully!")
 
@@ -233,15 +294,26 @@ class OfflineVocalCoach:
             if not installed:
                 return False
 
-            # Check if server already running and healthy for this model
-            if self._server_proc is not None and self._server_url and self._loaded_model_key == installed["key"]:
+            accel = self.get_acceleration_mode()
+            ngl = "99" if accel == "gpu" else "0"
+
+            # Check if server already running and healthy for this model and acceleration mode
+            if (self._server_proc is not None and self._server_url and
+                self._loaded_model_key == installed["key"] and
+                self._loaded_acceleration == accel):
                 if self._check_server_healthy(self._server_url):
                     return True
                 self.shutdown_engine()
 
             # Check if in-process llama_cpp already loaded
-            if self._llm is not None and self._loaded_model_key == installed["key"]:
+            if (self._llm is not None and
+                self._loaded_model_key == installed["key"] and
+                self._loaded_acceleration == accel):
                 return True
+
+            # If model key or acceleration changed while running, shut down first
+            if self._server_proc is not None or self._llm is not None:
+                self.shutdown_engine()
 
             # 1. Try launching standalone llama-server
             server_bin = self._find_llama_server_binary()
@@ -259,6 +331,7 @@ class OfflineVocalCoach:
                         "--port", str(port),
                         "--host", "127.0.0.1",
                         "--threads", str(n_threads),
+                        "-ngl", ngl,
                         "--ctx-size", "2048",
                         "--log-disable"
                     ]
@@ -289,7 +362,8 @@ class OfflineVocalCoach:
                         self._server_port = port
                         self._server_url = url
                         self._loaded_model_key = installed["key"]
-                        print(f"[OfflineVocalCoach] Standalone llama-server active on {url}", file=sys.stderr)
+                        self._loaded_acceleration = accel
+                        print(f"[OfflineVocalCoach] Standalone llama-server active on {url} (acceleration: {accel}, -ngl {ngl})", file=sys.stderr)
                         return True
                     else:
                         print(f"[OfflineVocalCoach] llama-server startup timed out (exit code: {proc.poll()})", file=sys.stderr)
@@ -304,13 +378,16 @@ class OfflineVocalCoach:
             try:
                 from llama_cpp import Llama
                 n_threads = max(2, os.cpu_count() - 1 if os.cpu_count() else 4)
+                n_gpu_layers = 99 if accel == "gpu" else 0
                 self._llm = Llama(
                     model_path=str(installed["path"]),
                     n_ctx=2048,
                     n_threads=n_threads,
+                    n_gpu_layers=n_gpu_layers,
                     verbose=False
                 )
                 self._loaded_model_key = installed["key"]
+                self._loaded_acceleration = accel
                 return True
             except ImportError:
                 pass
