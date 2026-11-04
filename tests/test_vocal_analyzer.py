@@ -80,12 +80,43 @@ class TestVocalTakeAnalyzer(unittest.TestCase):
             vocal_fry_pct=5.0,
             vocal_fry_verdict="Clean Core Phonation",
             overall_score=86,
-            coach_feedback=["Great breath control", "Consistent pitch accuracy"]
+            coach_feedback=["Great breath control", "Consistent pitch accuracy"],
+            pitch_scoop_pct=12.5,
+            attack_velocity_verdict="Clean Direct Attacks (Precise Onsets)",
+            dynamic_contrast_db=15.2,
+            dynamic_arc_verdict="Wide Dynamic Story Arc (High Emotional Contrast)",
+            vibrato_bloom_ms=360.0,
+            vibrato_style_verdict="Contemporary Terminal Bloom (Straight into Vibrato)"
         )
         d = report.to_dict()
         self.assertEqual(d["overall_score"], 86)
         self.assertEqual(d["pitch_accuracy_pct"], 88.5)
         self.assertEqual(d["recommended_key_shift"], -1)
+        self.assertEqual(d["pitch_scoop_pct"], 12.5)
+        self.assertEqual(d["dynamic_contrast_db"], 15.2)
+        self.assertEqual(d["vibrato_bloom_ms"], 360.0)
+        self.assertEqual(d["vibrato_style_verdict"], "Contemporary Terminal Bloom (Straight into Vibrato)")
+
+    def test_extended_telemetry_dsp_methods(self):
+        import numpy as np
+        # 1. Test clean attack (no scooping)
+        clean_pitches = np.array([440.0] * 30 + [0.0] * 10 + [440.0] * 30)
+        scoop_pct, verdict = self.analyzer._analyze_attack_velocity_and_scoop(clean_pitches)
+        self.assertEqual(scoop_pct, 0.0)
+        self.assertIn("Clean Direct Attacks", verdict)
+
+        # 2. Test dynamic contrast
+        sr = 22050
+        audio = np.concatenate([np.ones(sr) * 0.05, np.ones(sr) * 0.5])
+        pitches = np.ones(len(audio) // 330) * 440.0
+        contrast_db, arc_verdict = self.analyzer._analyze_dynamic_arc(audio, sr, pitches, hop_ms=15.0)
+        self.assertGreater(contrast_db, 10.0)
+
+        # 3. Test vibrato bloom detection
+        # Straight-tone
+        delay_ms, bloom_verdict = self.analyzer._analyze_vibrato_bloom(clean_pitches, vib_present=False)
+        self.assertEqual(delay_ms, 0.0)
+        self.assertIn("Straight-Tone", bloom_verdict)
 
 
 if __name__ == "__main__":

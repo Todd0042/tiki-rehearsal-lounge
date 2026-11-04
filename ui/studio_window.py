@@ -775,6 +775,24 @@ class StudioCockpitWindow:
         self.lbl_drawer_fry = tk.Label(row_fry, text="-- % (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
         self.lbl_drawer_fry.pack(side="left", padx=8)
 
+        row_scoop = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_scoop.pack(fill="x", pady=2)
+        tk.Label(row_scoop, text="🎯 Pitch Attack Velocity & Scooping:", font=("Helvetica", 8, "bold"), fg=COLOR_CYAN, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_scoop = tk.Label(row_scoop, text="-- (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_scoop.pack(side="left", padx=8)
+
+        row_arc = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_arc.pack(fill="x", pady=2)
+        tk.Label(row_arc, text="🎭 Dynamic Story Arc & Contrast:", font=("Helvetica", 8, "bold"), fg=COLOR_GOLD, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_arc = tk.Label(row_arc, text="-- (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_arc.pack(side="left", padx=8)
+
+        row_bloom = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_bloom.pack(fill="x", pady=2)
+        tk.Label(row_bloom, text="🌸 Vibrato Bloom Style:", font=("Helvetica", 8, "bold"), fg=COLOR_MAGENTA, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_bloom = tk.Label(row_bloom, text="-- (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_bloom.pack(side="left", padx=8)
+
         # Coach Notes
         self.notes_frame = tk.LabelFrame(
             scroll_content,
@@ -2336,6 +2354,9 @@ class StudioCockpitWindow:
         self.lbl_drawer_dyn.config(text=f"{report.energy_steadiness_pct:.0f}% ({report.dynamics_verdict})")
         self.lbl_drawer_sib.config(text=f"{report.sibilance_verdict} (ratio: {report.sibilance_ratio:.2f})")
         self.lbl_drawer_fry.config(text=f"{report.vocal_fry_pct:.0f}% ({report.vocal_fry_verdict})")
+        self.lbl_drawer_scoop.config(text=f"{report.pitch_scoop_pct:.0f}% ({report.attack_velocity_verdict})")
+        self.lbl_drawer_arc.config(text=f"{report.dynamic_contrast_db:.1f} dB ({report.dynamic_arc_verdict})")
+        self.lbl_drawer_bloom.config(text=f"{report.vibrato_style_verdict} ({report.vibrato_bloom_ms:.0f}ms delay)")
 
         # Save last report for conversational context
         self._last_take_report = report

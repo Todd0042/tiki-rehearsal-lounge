@@ -113,6 +113,14 @@ class TakeAnalysisReport:
     phrase_highlights: List[Dict[str, Any]] = None
     phrase_struggles: List[Dict[str, Any]] = None
 
+    # Extended Performer Telemetry (Attack Velocity, Dynamic Arc, Vibrato Bloom)
+    pitch_scoop_pct: float = 0.0          # % of phrase onsets that scooped up from >60¢ below
+    attack_velocity_verdict: str = "Clean Direct Attacks"
+    dynamic_contrast_db: float = 0.0      # dB difference between softest and loudest expressive phrases
+    dynamic_arc_verdict: str = "Natural Dynamic Arc"
+    vibrato_bloom_ms: float = 0.0         # Latency in ms before vibrato blooms on sustained notes
+    vibrato_style_verdict: str = "Natural Phonation"
+
     def __post_init__(self):
         if self.phrase_highlights is None:
             self.phrase_highlights = []
@@ -421,6 +429,11 @@ class VocalTakeAnalyzer:
             hop_ms=15.0
         )
 
+        # 10b. Extended Performer Telemetry (Attack Scooping, Dynamic Story Arc, Vibrato Bloom)
+        pitch_scoop_pct, attack_velocity_verdict = self._analyze_attack_velocity_and_scoop(s_pitches, hop_ms=15.0)
+        dynamic_contrast_db, dynamic_arc_verdict = self._analyze_dynamic_arc(singer_audio, sr, s_pitches, hop_ms=15.0)
+        vibrato_bloom_ms, vibrato_style_verdict = self._analyze_vibrato_bloom(s_pitches, hop_ms=15.0, vib_present=vib_present)
+
         # 11. Overall Score calculation (0 - 100)
         # 50% pitch accuracy, 15% intonation, 15% rhythm, 10% breath support, 10% balanced onsets
         intonation_penalty = min(20.0, abs(intonation))
@@ -492,6 +505,11 @@ class VocalTakeAnalyzer:
         if "Heavy" in fry_verdict:
             feedback.append("Noticeable vocal fry detected in lower phrases; ensure steady airflow to avoid cord fatigue.")
 
+        if pitch_scoop_pct >= 40.0:
+            feedback.append(f"Frequent pitch scooping detected ({pitch_scoop_pct:.0f}% of phrase attacks); aim to land directly on the note pitch center.")
+        elif dynamic_contrast_db >= 14.0:
+            feedback.append(f"Expressive dynamic contrast detected ({dynamic_contrast_db:.1f} dB); strong performance storytelling arc.")
+
         if progress_cb:
             progress_cb(1.00, "Vocal take analysis complete!")
 
@@ -525,7 +543,13 @@ class VocalTakeAnalyzer:
             overall_score=overall_score,
             coach_feedback=feedback,
             phrase_highlights=phrase_highlights,
-            phrase_struggles=phrase_struggles
+            phrase_struggles=phrase_struggles,
+            pitch_scoop_pct=pitch_scoop_pct,
+            attack_velocity_verdict=attack_velocity_verdict,
+            dynamic_contrast_db=dynamic_contrast_db,
+            dynamic_arc_verdict=dynamic_arc_verdict,
+            vibrato_bloom_ms=vibrato_bloom_ms,
+            vibrato_style_verdict=vibrato_style_verdict
         )
 
     def _suppress_speaker_bleed(
@@ -970,6 +994,135 @@ class VocalTakeAnalyzer:
             return float(np.mean(rates)), float(np.mean(depths)), True
 
         return 0.0, 0.0, False
+
+    def _analyze_attack_velocity_and_scoop(
+        self, pitches: np.ndarray, hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Analyzes pitch onset velocity across voiced phrase entries.
+        Detects if singer cleanly hits target pitch centers or consistently 'scoops'
+        upwards into notes from >= 60 cents below.
+        """
+        onsets = []
+        in_segment = False
+        seg_start = 0
+
+        for i, p in enumerate(pitches):
+            if p > 0 and not in_segment:
+                in_segment = True
+                seg_start = i
+            elif p <= 0 and in_segment:
+                in_segment = False
+                if (i - seg_start) >= 15:
+                    onsets.append(pitches[seg_start:seg_start + 15])
+        if in_segment and (len(pitches) - seg_start) >= 15:
+            onsets.append(pitches[seg_start:seg_start + 15])
+
+        if not onsets:
+            return 0.0, "Clean Direct Attacks (Precise Onsets)"
+
+        scoop_count = 0
+        for seg in onsets:
+            m_early = np.median([hz_to_midi(f) for f in seg[:3]])
+            m_settled = np.median([hz_to_midi(f) for f in seg[6:12]])
+            cents_delta = (m_settled - m_early) * 100.0
+            if cents_delta >= 60.0:  # Glided up by more than 60 cents
+                scoop_count += 1
+
+        scoop_pct = round((scoop_count / len(onsets)) * 100.0, 1)
+        if scoop_pct <= 15.0:
+            verdict = "Clean Direct Attacks (Precise Onsets)"
+        elif scoop_pct <= 38.0:
+            verdict = "Stylistic Occasional Scooping"
+        else:
+            verdict = "Frequent Pitch Scooping (Sliding into notes)"
+
+        return scoop_pct, verdict
+
+    def _analyze_dynamic_arc(
+        self, singer_audio: np.ndarray, sr: int, pitches: np.ndarray, hop_ms: float = 15.0
+    ) -> Tuple[float, str]:
+        """
+        Measures dynamic story arc contrast across active voiced singing passages in dB.
+        """
+        if len(singer_audio) == 0:
+            return 0.0, "Natural Dynamic Arc (Balanced Dynamics)"
+
+        hop_samples = int(sr * (hop_ms / 1000.0))
+        frame_len = hop_samples * 2
+
+        voiced_rms = []
+        for i, p in enumerate(pitches):
+            if p > 0:
+                start = i * hop_samples
+                end = start + frame_len
+                if end <= len(singer_audio):
+                    frame = singer_audio[start:end]
+                    rms = np.sqrt(np.mean(frame ** 2) + 1e-12)
+                    voiced_rms.append(rms)
+
+        if len(voiced_rms) < 20:
+            return 0.0, "Natural Dynamic Arc (Balanced Dynamics)"
+
+        p10 = np.percentile(voiced_rms, 10)
+        p90 = np.percentile(voiced_rms, 90)
+        ratio = max(1e-5, p90) / max(1e-5, p10)
+        contrast_db = round(float(20.0 * math.log10(ratio)), 1)
+
+        if contrast_db >= 14.0:
+            verdict = "Wide Dynamic Story Arc (High Emotional Contrast)"
+        elif contrast_db >= 6.5:
+            verdict = "Natural Dynamic Arc (Balanced Dynamics)"
+        else:
+            verdict = "Flat Dynamic Level (Static Volume)"
+
+        return contrast_db, verdict
+
+    def _analyze_vibrato_bloom(
+        self, pitches: np.ndarray, hop_ms: float = 15.0, vib_present: bool = False
+    ) -> Tuple[float, str]:
+        """
+        Analyzes vibrato bloom delay on sustained notes (>= 1.0s).
+        Differentiates contemporary terminal bloom from classic continuous vibrato.
+        """
+        if not vib_present:
+            return 0.0, "Straight-Tone Phonation (Minimal Vibrato)"
+
+        sustained = []
+        current = []
+        for p in pitches:
+            if p > 0:
+                current.append(p)
+            else:
+                if len(current) >= 65:
+                    sustained.append(np.array(current))
+                current = []
+        if len(current) >= 65:
+            sustained.append(np.array(current))
+
+        if not sustained:
+            return 150.0, "Natural Vibrato Modulation"
+
+        delays = []
+        for seg in sustained:
+            midi_seg = np.array([hz_to_midi(f) for f in seg])
+            trend = np.convolve(midi_seg, np.ones(11) / 11, mode="same")
+            osc = np.abs((midi_seg - trend) * 100.0)
+
+            bloom_idx = 0
+            for idx in range(len(osc) - 10):
+                if np.mean(osc[idx:idx + 10]) >= 20.0:
+                    bloom_idx = idx
+                    break
+            delays.append(bloom_idx * hop_ms)
+
+        mean_delay = float(np.mean(delays)) if delays else 0.0
+        if mean_delay >= 350.0:
+            verdict = "Contemporary Terminal Bloom (Straight into Vibrato)"
+        else:
+            verdict = "Continuous Classic Vibrato"
+
+        return round(mean_delay, 1), verdict
 
     def _analyze_resonance(
         self,

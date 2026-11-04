@@ -588,20 +588,23 @@ class OfflineVocalCoach:
             f"- Resonance Ring: {report.get('resonance_verdict', '')} (ratio {report.get('singers_formant_ratio', 0)})\n"
             f"- Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', '')})\n"
             f"- Glottal Attack Dynamics: {report.get('onset_attack_verdict', '')}\n"
-            f"- Vibrato: {vib_str}\n"
+            f"- Vibrato: {vib_str} (Bloom Style: {report.get('vibrato_style_verdict', 'Natural')})\n"
             f"- Dynamic Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', '')})\n"
             f"- Sibilance & Fry: Sibilance {report.get('sibilance_verdict', '')}, Fry {report.get('vocal_fry_pct', 0)}% ({report.get('vocal_fry_verdict', '')})\n"
             f"- Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')}\n"
+            f"- Attack Velocity & Scooping: {report.get('pitch_scoop_pct', 0)}% scooped attacks ({report.get('attack_velocity_verdict', 'Clean')})\n"
+            f"- Dynamic Story Arc: {report.get('dynamic_contrast_db', 0)} dB contrast ({report.get('dynamic_arc_verdict', 'Natural')})\n"
             f"- Key Shift: {shift:+d} semitones (Recommended: {rec_shift:+d} semitones)\n"
             f"{feedback_section}"
             f"{phrase_section}\n"
             f"{prog_section}\n"
-            f"Give me an encouraging, human-grade, in-depth studio debrief structured with:\n"
-            f"1. 🌟 **What Clicked ([MM:SS])**: Detail the specific timestamped passages where I excelled, the notes, and why the tone worked.\n"
-            f"2. ⚠️ **Where It Slipped ([MM:SS])**: Detail the specific timestamped passages where pitch wandered, breath sagged, or rhythm was late/early, explaining the acoustic cause.\n"
-            f"3. 🛠️ **Targeted Physical Adjustments**: Exactly 2 actionable mechanical cues (ribcage expansion, soft palate lift, mask placement) to fix the struggle moments on my next take.\n"
-            f"4. 📈 **Vocal Progression & Growth Trajectory**: A 2-sentence summary of my trajectory across takes (celebrating improvements or highlighting what to stabilize next). If Attempt #1, establish my starting benchmark.\n"
-            f"Speak directly to me like an expert mentor in the studio lounge. Do NOT just recite global percentages.<|im_end|>\n"
+            f"CRITICAL INSTRUCTION: The singer ALREADY sees the raw timestamped highlight list and struggle list in the UI cards directly above your text. "
+            f"DO NOT duplicate or re-list them. Deliver your unique, expert vocal masterclass synthesis with:\n"
+            f"1. 🔬 **Acoustic Diagnosis (The Root-Cause 'Why')**: Explain the underlying vocal fold physiology, airflow, attack scooping, and vocal tract resonance behind my take metrics.\n"
+            f"2. 🛠️ **Targeted Micro-Drill (30-Second Practice Fix)**: Prescribe ONE concrete, isolated physical vocal exercise (e.g. SOVTE straw phonation, puffy-cheek 'GUG', or staccato onset drill) to practice before my next take.\n"
+            f"3. 🎯 **Priority Directive for Take #2**: ONE single, clear mental focus directive for my very next rehearsal take.\n"
+            f"4. 📈 **Vocal Progression Trajectory**: A 2-sentence summary of my trajectory across takes (or benchmark if Take #1).\n"
+            f"Speak directly to me like a master studio director. Do NOT repeat the cards above.<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
         return prompt
@@ -643,11 +646,13 @@ class OfflineVocalCoach:
                 f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
                 f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% (within ±50¢)\n"
                 f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
+                f"- Attack Velocity & Scooping: {report.get('pitch_scoop_pct', 0)}% scooped attacks ({report.get('attack_velocity_verdict', 'Clean')})\n"
                 f"- Rhythm / Timing Pocket: {rhythm_ms:+0.1f} ms onset latency ({rhythm_verdict})\n"
                 f"- Resonance Ring (Singer's Formant): {report.get('resonance_verdict', 'Balanced')} (ratio: {report.get('singers_formant_ratio', 0)})\n"
                 f"- Diaphragmatic Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', 'Stable')})\n"
                 f"- Phonation Onset Attacks: {report.get('onset_attack_verdict', 'Balanced')}\n"
-                f"- Vibrato: {vib_str}\n"
+                f"- Vibrato: {vib_str} (Bloom Style: {report.get('vibrato_style_verdict', 'Natural')})\n"
+                f"- Dynamic Story Arc: {report.get('dynamic_contrast_db', 0)} dB contrast ({report.get('dynamic_arc_verdict', 'Natural')})\n"
                 f"- Dynamics Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', 'Balanced')})\n"
                 f"- Vocal Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')} ({report.get('take_range_semitones', 0)} semitones)\n"
                 f"- Key Shift: {report.get('current_key_shift', 0):+d} semitones (Recommended: {report.get('recommended_key_shift', 0):+d})\n"
@@ -678,7 +683,7 @@ class OfflineVocalCoach:
         profile: Optional[Dict[str, Any]],
         progression_data: Optional[Dict[str, Any]] = None
     ) -> str:
-        """High-grade pedagogical debrief synthesis incorporating timestamped song moments and progression."""
+        """High-grade pedagogical debrief synthesis providing unique non-duplicative analysis, diagnosis, and micro-drills."""
         score = report.get("overall_score", 0)
         pitch = report.get("pitch_accuracy_pct", 0)
         into = report.get("intonation_cents", 0.0)
@@ -686,41 +691,72 @@ class OfflineVocalCoach:
         res = report.get("resonance_verdict", "Balanced")
         shift = report.get("current_key_shift", 0)
         rec_shift = report.get("recommended_key_shift", 0)
-        highlights = report.get("phrase_highlights", [])
         struggles = report.get("phrase_struggles", [])
 
         lines = []
-
         lines.append(
-            f"Solid take! Scoring **{score}/100**, your vocal showed a **{res}** tone character with strong dynamic commitment. "
-            "Here is the chronological breakdown of where you locked into the pocket and where to make physical adjustments:"
+            f"Solid take! Scoring **{score}/100**, your vocal showed a **{res}** tone character with "
+            f"**{report.get('attack_velocity_verdict', 'clean direct attacks')}** and a **{report.get('dynamic_arc_verdict', 'natural dynamic arc')}**.\n"
+            "*(Review the timestamped highlight and focus cards above for your exact note breakdowns.)*"
         )
 
-        # 1. What Clicked
-        lines.append("\n🌟 **What Clicked**:")
-        if highlights:
-            for h in highlights:
-                lines.append(f"• **[{h['timestamp']}] ({h['note_span']})**: {h['detail']}")
+        # 1. Acoustic Diagnosis (The Root-Cause 'Why')
+        lines.append("\n🔬 **Acoustic Diagnosis (Underlying Physiology)**:")
+        if into <= -15.0 or breath < 70.0:
+            lines.append(
+                f"• Airflow pressure sagged across phrase endings (breath support: {breath}%), pulling intonation flat ({into:+.1f}¢). "
+                "The vocal folds lost subglottic air support before phonation completed."
+            )
+        elif into >= 18.0:
+            lines.append(
+                f"• Intonation pushed sharp ({into:+.1f}¢), indicating elevated laryngeal positioning and excess muscular cord compression on higher vowels."
+            )
         else:
-            lines.append("• Vocal onsets showed clean dynamic energy with healthy phonation.")
+            lines.append(
+                f"• Intonation stayed well-centered ({into:+.1f}¢) with balanced vocal fold adduction and steady diaphragmatic support."
+            )
 
-        # 2. Where It Slipped
-        lines.append("\n⚠️ **Where It Slipped**:")
-        if struggles:
-            for s in struggles:
-                lines.append(f"• **[{s['timestamp']}] ({s['note_span']})**: {s['detail']}")
-        else:
-            lines.append("• Minor intonation variances detected during rapid melodic transitions.")
+        if report.get("pitch_scoop_pct", 0) >= 30.0:
+            lines.append(
+                f"• Pitch attack velocity showed {report.get('pitch_scoop_pct'):.0f}% scooping—you are sliding up from underneath into phrase starts rather than establishing pitch center at onset."
+            )
 
-        # 3. Targeted Physical Adjustments
-        lines.append("\n🛠️ **Targeted Physical Adjustments**:")
-        if struggles and any(s.get("cue") for s in struggles):
-            cues = [s["cue"] for s in struggles if s.get("cue")]
-            for idx, c in enumerate(cues[:2], 1):
-                lines.append(f"{idx}. {c}")
+        rhythm_offset = report.get("rhythm_offset_ms", 0.0)
+        if abs(rhythm_offset) >= 20.0:
+            rhythm_dir = "lagging behind" if rhythm_offset > 0 else "anticipating ahead of"
+            lines.append(
+                f"• Rhythm pocket was {rhythm_offset:+.1f} ms off the beat transients ({rhythm_dir} tempo), which creates a feeling of rhythmic hesitation."
+            )
+
+        # 2. Targeted Micro-Drill (30-Second Practice Fix)
+        lines.append("\n🛠️ **Targeted Micro-Drill (30-Second Practice Fix)**:")
+        if report.get("pitch_scoop_pct", 0) >= 30.0:
+            lines.append(
+                "• **Clean Attack Staccato Drill**: Sing the first 3 words of your struggle phrase as detached, spoken-level 'STAC-CA-TO' syllables on a neutral 'BUH' or 'DUH'. Lock the pitch instant at onset before reconnecting into legato."
+            )
+        elif into >= 18.0 or (struggles and any("sharp" in s.get("detail", "") for s in struggles)):
+            lines.append(
+                "• **Laryngeal Neutralizer (Puffy-Cheek 'GUG')**: Isolate your highest passage and sing the melodic line on 'GUG-GUG-GUG' with puffy cheeks. The hard 'G' drop disengages outer neck constrictors and lowers the thyroid cartilage."
+            )
+        elif breath < 75.0 or (struggles and any("sag" in s.get("detail", "") for s in struggles)):
+            lines.append(
+                "• **SOVTE Straw/Hiss Phonation**: Take your struggle passage and blow a steady unvoiced 'Sssss' or phonate through a straw for the exact phrase duration. Feel your floating ribs remain expanded until the final second."
+            )
         else:
-            lines.append("1. Keep your lower ribcage expanded through the vowel tail to maintain air pressure without throat tension.")
-            lines.append("2. Lift your soft palate (think of starting a relaxed yawn) before ascending into higher phrases.")
+            lines.append(
+                "• **Resonance Ring Vowel Drill**: Sing the melodic hook on an open 'Mee-Ah' vowel glide, keeping the vibration buzz focused in your cheekbones and nasal bridge."
+            )
+
+        # 3. Priority Focus Directive for Take #2
+        lines.append("\n🎯 **Priority Directive for Take #2**:")
+        if shift != rec_shift:
+            lines.append(f"• Transpose the track to **{rec_shift:+d} semitones** ({report.get('key_recommendation_reason', '')}).")
+        elif report.get("rhythm_offset_ms", 0.0) > 20.0:
+            lines.append("• Anticipate your breath on beat 4 so you attack line-entries right on beat 1 instead of dragging.")
+        elif breath < 70.0:
+            lines.append("• Prioritize holding lower ribcage expansion all the way through phrase endings.")
+        else:
+            lines.append("• Maintain forward facial mask resonance and trust your breath support through transitions.")
 
         # 4. Vocal Progression & Growth Trajectory
         if progression_data:

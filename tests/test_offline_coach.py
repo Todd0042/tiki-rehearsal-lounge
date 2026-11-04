@@ -42,10 +42,13 @@ class TestOfflineCoach(unittest.TestCase):
         }
         debrief = self.coach._generate_rule_based_debrief(report, track_info=None, profile=None)
         self.assertIn("88/100", debrief)
-        self.assertIn("What Clicked", debrief)
-        self.assertIn("Where It Slipped", debrief)
-        self.assertIn("Drop the jaw", debrief)
+        self.assertIn("Acoustic Diagnosis", debrief)
+        self.assertIn("Targeted Micro-Drill", debrief)
+        self.assertIn("Priority Directive for Take #2", debrief)
         self.assertIn("Transposing from +0 to **-1**", debrief)
+        # Verify the raw highlight / struggle cards were NOT duplicated in the debrief text
+        self.assertNotIn("🌟 **What Clicked**", debrief)
+        self.assertNotIn("⚠️ **Where It Slipped**", debrief)
 
     def test_server_binary_resolution(self):
         """Verifies that _find_llama_server_binary locates bundled bin/llama-server if present."""
@@ -111,7 +114,13 @@ class TestOfflineCoach(unittest.TestCase):
             "recommended_key_shift": -1,
             "coach_feedback": ["Attack onsets lagged slightly behind the beat transients."],
             "phrase_highlights": [{"timestamp": "0:15", "note_span": "C3 -> E3", "detail": "Locked into the pocket."}],
-            "phrase_struggles": [{"timestamp": "0:42", "note_span": "F4", "detail": "Started line late.", "cue": "Anticipate onset on 4-and."}]
+            "phrase_struggles": [{"timestamp": "0:42", "note_span": "F4", "detail": "Started line late.", "cue": "Anticipate onset on 4-and."}],
+            "pitch_scoop_pct": 33.3,
+            "attack_velocity_verdict": "Stylistic Occasional Scooping",
+            "dynamic_contrast_db": 14.5,
+            "dynamic_arc_verdict": "Wide Dynamic Story Arc",
+            "vibrato_bloom_ms": 380.0,
+            "vibrato_style_verdict": "Contemporary Terminal Bloom"
         }
         track = {"title": "Don't Stop Believin'", "artist": "Journey"}
         user_msg = "how was my timing for lines?"
@@ -120,7 +129,7 @@ class TestOfflineCoach(unittest.TestCase):
             {"role": "assistant", "content": "Ready when you are!"},
             {"role": "user", "content": user_msg}
         ]
-        debrief_txt = "🌟 What Clicked: Great pitch! ⚠️ Where It Slipped: Line start at [0:42] lagged."
+        debrief_txt = "🔬 Acoustic Diagnosis: Solid support. 🛠️ Targeted Micro-Drill: Staccato."
 
         prompt = self.coach._build_chat_prompt(
             user_msg,
@@ -130,15 +139,17 @@ class TestOfflineCoach(unittest.TestCase):
             debrief_text=debrief_txt
         )
 
-        # 1. Timing metrics must be present
+        # 1. Timing & Performer telemetry metrics must be present
         self.assertIn("+28.5 ms", prompt)
         self.assertIn("Dragging Behind", prompt)
+        self.assertIn("33.3%", prompt)
+        self.assertIn("14.5 dB", prompt)
+        self.assertIn("Contemporary Terminal Bloom", prompt)
 
         # 2. Track identity and debrief memory must be present
         self.assertIn("Don't Stop Believin'", prompt)
         self.assertIn("Journey", prompt)
-        self.assertIn("Line start at [0:42] lagged", prompt)
-        self.assertIn("Anticipate onset on 4-and", prompt)
+        self.assertIn("Acoustic Diagnosis: Solid support", prompt)
 
         # 3. User message must NOT be duplicated consecutively
         self.assertEqual(prompt.count("how was my timing for lines?"), 1)
@@ -160,6 +171,9 @@ class TestOfflineCoach(unittest.TestCase):
             "vibrato_present": True,
             "vibrato_rate_hz": 6.0,
             "vibrato_depth_cents": 50.0,
+            "vibrato_style_verdict": "Contemporary Terminal Bloom",
+            "dynamic_contrast_db": 12.0,
+            "dynamic_arc_verdict": "Natural Dynamic Arc",
             "energy_steadiness_pct": 90.0,
             "dynamics_verdict": "Steady",
             "sibilance_verdict": "Clean",
@@ -179,6 +193,8 @@ class TestOfflineCoach(unittest.TestCase):
         self.assertIn("Rushing Ahead", prompt)
         self.assertIn("6.0 Hz", prompt)
         self.assertIn("Sweet Caroline", prompt)
+        self.assertIn("12.0 dB", prompt)
+        self.assertIn("Contemporary Terminal Bloom", prompt)
 
     def tearDown(self):
         self.coach.shutdown_engine()
