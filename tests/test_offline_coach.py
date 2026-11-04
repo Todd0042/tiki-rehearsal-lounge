@@ -85,6 +85,101 @@ class TestOfflineCoach(unittest.TestCase):
         self.assertTrue(self.coach.set_preferred_model("3b"))
         self.assertFalse(self.coach.set_preferred_model("invalid_model_key"))
 
+    def test_chat_prompt_assembly(self):
+        """Verifies that chat prompt includes rhythm latency, song identity, debrief memory, and avoids duplicate user turns."""
+        report = {
+            "overall_score": 82,
+            "pitch_accuracy_pct": 89.0,
+            "intonation_cents": -4.2,
+            "intonation_verdict": "Flat",
+            "rhythm_offset_ms": 28.5,
+            "rhythm_verdict": "Dragging Behind",
+            "resonance_verdict": "Ring Present",
+            "singers_formant_ratio": 0.42,
+            "breath_support_pct": 78.0,
+            "breath_support_verdict": "Stable",
+            "onset_attack_verdict": "Clean Onset",
+            "vibrato_present": True,
+            "vibrato_rate_hz": 5.8,
+            "vibrato_depth_cents": 45.0,
+            "energy_steadiness_pct": 86.0,
+            "dynamics_verdict": "Even",
+            "take_min_note": "A2",
+            "take_max_note": "F4",
+            "take_range_semitones": 20.0,
+            "current_key_shift": 0,
+            "recommended_key_shift": -1,
+            "coach_feedback": ["Attack onsets lagged slightly behind the beat transients."],
+            "phrase_highlights": [{"timestamp": "0:15", "note_span": "C3 -> E3", "detail": "Locked into the pocket."}],
+            "phrase_struggles": [{"timestamp": "0:42", "note_span": "F4", "detail": "Started line late.", "cue": "Anticipate onset on 4-and."}]
+        }
+        track = {"title": "Don't Stop Believin'", "artist": "Journey"}
+        user_msg = "how was my timing for lines?"
+        history = [
+            {"role": "user", "content": "hello coach"},
+            {"role": "assistant", "content": "Ready when you are!"},
+            {"role": "user", "content": user_msg}
+        ]
+        debrief_txt = "🌟 What Clicked: Great pitch! ⚠️ Where It Slipped: Line start at [0:42] lagged."
+
+        prompt = self.coach._build_chat_prompt(
+            user_msg,
+            history,
+            report,
+            track,
+            debrief_text=debrief_txt
+        )
+
+        # 1. Timing metrics must be present
+        self.assertIn("+28.5 ms", prompt)
+        self.assertIn("Dragging Behind", prompt)
+
+        # 2. Track identity and debrief memory must be present
+        self.assertIn("Don't Stop Believin'", prompt)
+        self.assertIn("Journey", prompt)
+        self.assertIn("Line start at [0:42] lagged", prompt)
+        self.assertIn("Anticipate onset on 4-and", prompt)
+
+        # 3. User message must NOT be duplicated consecutively
+        self.assertEqual(prompt.count("how was my timing for lines?"), 1)
+
+    def test_debrief_prompt_assembly(self):
+        """Verifies that debrief prompt includes rhythm metrics, vibrato, and key telemetry."""
+        report = {
+            "overall_score": 85,
+            "pitch_accuracy_pct": 90.0,
+            "intonation_cents": 2.0,
+            "intonation_verdict": "On Pitch",
+            "rhythm_offset_ms": -12.0,
+            "rhythm_verdict": "Rushing Ahead",
+            "resonance_verdict": "Ring Present",
+            "singers_formant_ratio": 0.45,
+            "breath_support_pct": 85.0,
+            "breath_support_verdict": "Solid",
+            "onset_attack_verdict": "Balanced",
+            "vibrato_present": True,
+            "vibrato_rate_hz": 6.0,
+            "vibrato_depth_cents": 50.0,
+            "energy_steadiness_pct": 90.0,
+            "dynamics_verdict": "Steady",
+            "sibilance_verdict": "Clean",
+            "vocal_fry_pct": 3.0,
+            "vocal_fry_verdict": "Low",
+            "take_min_note": "C3",
+            "take_max_note": "G4",
+            "current_key_shift": 0,
+            "recommended_key_shift": 0,
+            "coach_feedback": ["Solid pitch accuracy."],
+            "phrase_highlights": [],
+            "phrase_struggles": []
+        }
+        track = {"title": "Sweet Caroline", "artist": "Neil Diamond"}
+        prompt = self.coach._build_debrief_prompt(report, track, profile=None)
+        self.assertIn("-12.0 ms", prompt)
+        self.assertIn("Rushing Ahead", prompt)
+        self.assertIn("6.0 Hz", prompt)
+        self.assertIn("Sweet Caroline", prompt)
+
     def tearDown(self):
         self.coach.shutdown_engine()
 

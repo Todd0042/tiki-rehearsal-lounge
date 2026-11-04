@@ -1029,6 +1029,19 @@ class StudioCockpitWindow:
 
         btn_p2 = tk.Button(
             pills_row,
+            text="⏱️ Timing & Rhythm",
+            font=("Helvetica", 7, "bold"),
+            bg="#2a143f",
+            fg=COLOR_CYAN,
+            bd=0,
+            padx=6,
+            pady=3,
+            command=lambda: self._send_coach_prompt("How was my line onset timing and rhythm? Did I start any sentences late or drag?")
+        )
+        btn_p2.pack(side="left", padx=4)
+
+        btn_p3 = tk.Button(
+            pills_row,
             text="🎹 Key Shift Advice",
             font=("Helvetica", 7, "bold"),
             bg="#2a143f",
@@ -1038,20 +1051,20 @@ class StudioCockpitWindow:
             pady=3,
             command=lambda: self._send_coach_prompt("Would changing the key shift make this song fit my voice better?")
         )
-        btn_p2.pack(side="left", padx=4)
+        btn_p3.pack(side="left", padx=4)
 
-        btn_p3 = tk.Button(
+        btn_p4 = tk.Button(
             pills_row,
-            text="✨ Add Resonance Ring",
+            text="✨ Resonance Ring",
             font=("Helvetica", 7, "bold"),
             bg="#2a143f",
-            fg=COLOR_CYAN,
+            fg=COLOR_LIME,
             bd=0,
             padx=6,
             pady=3,
             command=lambda: self._send_coach_prompt("How can I get more singer's formant ring without throat strain?")
         )
-        btn_p3.pack(side="left", padx=4)
+        btn_p4.pack(side="left", padx=4)
 
         # Chat Transcript Frame
         self.chat_transcript_container = tk.Frame(self.conversation_card, bg="#0d0615", bd=1, relief="solid", padx=8, pady=6)
@@ -2808,6 +2821,7 @@ class StudioCockpitWindow:
                 profile_dict,
                 progression_data=progression_data
             )
+            self._last_debrief_text = debrief
             # Record take in progression database
             self.progression_db.record_take(
                 track_title=track_title,
@@ -2861,11 +2875,13 @@ class StudioCockpitWindow:
 
         def _worker():
             rep_dict = self._last_take_report.to_dict() if self._last_take_report else None
+            debrief_ctx = getattr(self, "_last_debrief_text", None)
             reply = self.offline_coach.chat_with_coach(
                 msg,
                 self.chat_history,
                 rep_dict,
-                self.selected_track
+                self.selected_track,
+                debrief_text=debrief_ctx
             )
             self.chat_history.append({"role": "assistant", "content": reply})
 

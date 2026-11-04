@@ -66,15 +66,32 @@ AVAILABLE_MODELS: Dict[str, Dict[str, Any]] = {
     }
 }
 
-SYSTEM_PROMPT = (
+DEBRIEF_SYSTEM_PROMPT = (
     "You are Maestro Tiki, an encouraging, world-class vocal coach and master rehearsal director "
     "inside a retro neon Polynesian studio lounge. You analyze performance takes with sharp "
-    "acoustic and musical precision (pitch accuracy, intonation drift, diaphragmatic breath support, "
-    "singer's formant resonance ring, glottal attack onset dynamics, energy steadiness, sibilance, and vocal fry). "
+    "acoustic and musical precision (pitch accuracy %, intonation drift cents, rhythm onset latency ms, "
+    "diaphragmatic breath support %, singer's formant resonance ring, glottal attack dynamics, vibrato dynamics, "
+    "and vocal fry). Ground your evaluation strictly in the objective audio measurements provided. "
     "Provide warm, supportive, actionable feedback with specific physical vocal cues (soft palate, mask placement, "
     "ribcage expansion, tongue posture, key shift recommendations). "
-    "Keep take debriefings focused to 2 concise paragraphs with 2 bullet action items. Never sound robotic."
+    "Keep take debriefings focused, chronological, and pedagogical. Never sound robotic."
 )
+
+CHAT_SYSTEM_PROMPT = (
+    "You are Maestro Tiki, an encouraging, candid, and expert vocal coach having a 1-on-1 dialogue "
+    "with a singer in your neon studio control room right after their rehearsal take. "
+    "You have direct access to their exact objective performance metrics (pitch accuracy %, intonation cents drift, "
+    "rhythm pocket timing in milliseconds, breath support, vibrato, dynamics, and timestamped highlights/struggles) "
+    "as well as the take debrief analysis you just provided. "
+    "Answer the singer's questions directly, conversationally, and specifically using their real numbers and timestamps. "
+    "When asked about timing, cite their rhythm pocket latency (in ms) and whether they were dragging or rushing. "
+    "When asked about pitch or range, cite specific notes, cents drift, and whether a key shift is warranted. "
+    "Speak naturally like a passionate mentor in 1-2 focused, conversational paragraphs. "
+    "Do NOT use rigid boilerplate headings or unsolicited bulleted lists unless explicitly asked. "
+    "Never be vague, never repeat yourself, and never contradict the take telemetry."
+)
+
+SYSTEM_PROMPT = DEBRIEF_SYSTEM_PROMPT
 
 
 class OfflineVocalCoach:
@@ -472,7 +489,8 @@ class OfflineVocalCoach:
         user_message: str,
         conversation_history: List[Dict[str, str]],
         report_data: Optional[Dict[str, Any]] = None,
-        track_info: Optional[Dict[str, Any]] = None
+        track_info: Optional[Dict[str, Any]] = None,
+        debrief_text: Optional[str] = None
     ) -> str:
         """
         Interactive conversational reply regarding the take and vocal mechanics.
@@ -488,12 +506,18 @@ class OfflineVocalCoach:
                 "focus on steady ribcage breath support and keeping vowel resonance centered in your facial mask!"
             )
 
-        prompt = self._build_chat_prompt(user_message, conversation_history, report_data, track_info)
+        prompt = self._build_chat_prompt(
+            user_message,
+            conversation_history,
+            report_data,
+            track_info,
+            debrief_text=debrief_text
+        )
         result = self._query_completion(
             prompt,
-            max_tokens=280,
+            max_tokens=450,
             temperature=0.7,
-            stop=["<|im_end|>", "<|endoftext|>", "Singer:"]
+            stop=["<|im_end|>", "<|endoftext|>", "Singer:", "User:"]
         )
         if result:
             return result
@@ -543,22 +567,38 @@ class OfflineVocalCoach:
                 prog_section += "- This is your baseline take (Attempt #1) for this track.\n"
             prog_section += f"- Total practice takes in studio history: {progression_data.get('studio_total_takes', 1)}\n"
 
+        vib_str = (
+            f"{report.get('vibrato_rate_hz', 0.0)} Hz (±{report.get('vibrato_depth_cents', 0)}¢)"
+            if report.get("vibrato_present")
+            else "Straight-tone / Minimal vibrato"
+        )
+        feedback_list = report.get("coach_feedback", [])
+        feedback_section = ""
+        if feedback_list:
+            feedback_section = "\nAcoustic Telemetry Observations:\n" + "\n".join([f"- {f}" for f in feedback_list[:4]]) + "\n"
+
         prompt = (
-            f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>system\n{DEBRIEF_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n"
             f"Here are the objective audio analysis results for my vocal take of '{track_title}' {f'by {track_artist}' if track_artist else ''}:\n"
             f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
             f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% within ±50 cents\n"
             f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', '')})\n"
+            f"- Rhythm Pocket: {report.get('rhythm_offset_ms', 0):+0.1f} ms onset latency ({report.get('rhythm_verdict', 'Locked On')})\n"
             f"- Resonance Ring: {report.get('resonance_verdict', '')} (ratio {report.get('singers_formant_ratio', 0)})\n"
             f"- Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', '')})\n"
-            f"- Glottal Attack: {report.get('onset_attack_verdict', '')}\n"
+            f"- Glottal Attack Dynamics: {report.get('onset_attack_verdict', '')}\n"
+            f"- Vibrato: {vib_str}\n"
+            f"- Dynamic Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', '')})\n"
+            f"- Sibilance & Fry: Sibilance {report.get('sibilance_verdict', '')}, Fry {report.get('vocal_fry_pct', 0)}% ({report.get('vocal_fry_verdict', '')})\n"
+            f"- Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')}\n"
             f"- Key Shift: {shift:+d} semitones (Recommended: {rec_shift:+d} semitones)\n"
+            f"{feedback_section}"
             f"{phrase_section}\n"
             f"{prog_section}\n"
             f"Give me an encouraging, human-grade, in-depth studio debrief structured with:\n"
             f"1. 🌟 **What Clicked ([MM:SS])**: Detail the specific timestamped passages where I excelled, the notes, and why the tone worked.\n"
-            f"2. ⚠️ **Where It Slipped ([MM:SS])**: Detail the specific timestamped passages where pitch wandered or breath sagged, explaining the acoustic cause.\n"
+            f"2. ⚠️ **Where It Slipped ([MM:SS])**: Detail the specific timestamped passages where pitch wandered, breath sagged, or rhythm was late/early, explaining the acoustic cause.\n"
             f"3. 🛠️ **Targeted Physical Adjustments**: Exactly 2 actionable mechanical cues (ribcage expansion, soft palate lift, mask placement) to fix the struggle moments on my next take.\n"
             f"4. 📈 **Vocal Progression & Growth Trajectory**: A 2-sentence summary of my trajectory across takes (celebrating improvements or highlighting what to stabilize next). If Attempt #1, establish my starting benchmark.\n"
             f"Speak directly to me like an expert mentor in the studio lounge. Do NOT just recite global percentages.<|im_end|>\n"
@@ -571,27 +611,59 @@ class OfflineVocalCoach:
         user_msg: str,
         history: List[Dict[str, str]],
         report: Optional[Dict[str, Any]],
-        track_info: Optional[Dict[str, Any]]
+        track_info: Optional[Dict[str, Any]],
+        debrief_text: Optional[str] = None
     ) -> str:
-        prompt = f"<|im_start|>system\n{SYSTEM_PROMPT}\n"
+        prompt = f"<|im_start|>system\n{CHAT_SYSTEM_PROMPT}\n"
+        track_title = track_info.get("title", "") if track_info else ""
+        track_artist = track_info.get("artist", "") if track_info else ""
+
         if report:
             highlights = report.get("phrase_highlights", [])
             struggles = report.get("phrase_struggles", [])
-            h_str = "; ".join([f"[{h['timestamp']}] {h['note_span']}" for h in highlights]) if highlights else "None"
-            s_str = "; ".join([f"[{s['timestamp']}] {s['note_span']}" for s in struggles]) if struggles else "None"
+            h_lines = [f"• [{h['timestamp']}] ({h['note_span']}): {h['detail']}" for h in highlights]
+            s_lines = [f"• [{s['timestamp']}] ({s['note_span']}): {s['detail']} | Mechanical Cue: {s.get('cue', '')}" for s in struggles]
+            h_str = "\n".join(h_lines) if h_lines else "None flagged."
+            s_str = "\n".join(s_lines) if s_lines else "None flagged."
+
+            feedback_list = report.get("coach_feedback", [])
+            feedback_str = "\n".join([f"- {f}" for f in feedback_list[:4]]) if feedback_list else "None."
+
+            rhythm_ms = report.get("rhythm_offset_ms", 0.0)
+            rhythm_verdict = report.get("rhythm_verdict", "Locked On")
+            vib_str = (
+                f"{report.get('vibrato_rate_hz', 0.0)} Hz (±{report.get('vibrato_depth_cents', 0)}¢)"
+                if report.get("vibrato_present")
+                else "Straight-tone / Minimal vibrato"
+            )
 
             prompt += (
-                f"Context for Current Take: Score {report.get('overall_score')}/100, "
-                f"Pitch {report.get('pitch_accuracy_pct')}%, Intonation {report.get('intonation_cents'):+0.1f}¢, "
-                f"Resonance {report.get('resonance_verdict')}, Breath {report.get('breath_support_verdict')}, "
-                f"Attacks {report.get('onset_attack_verdict')}, Key Shift: {report.get('current_key_shift', 0):+d}.\n"
-                f"Song Highlights: {h_str}\n"
-                f"Struggle Focus Moments: {s_str}\n"
+                f"\n=== SINGER'S LATEST PERFORMANCE TELEMETRY ===\n"
+                f"Track: '{track_title}' {f'by {track_artist}' if track_artist else ''}\n"
+                f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
+                f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% (within ±50¢)\n"
+                f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
+                f"- Rhythm / Timing Pocket: {rhythm_ms:+0.1f} ms onset latency ({rhythm_verdict})\n"
+                f"- Resonance Ring (Singer's Formant): {report.get('resonance_verdict', 'Balanced')} (ratio: {report.get('singers_formant_ratio', 0)})\n"
+                f"- Diaphragmatic Breath Support: {report.get('breath_support_pct', 0)}% ({report.get('breath_support_verdict', 'Stable')})\n"
+                f"- Phonation Onset Attacks: {report.get('onset_attack_verdict', 'Balanced')}\n"
+                f"- Vibrato: {vib_str}\n"
+                f"- Dynamics Steadiness: {report.get('energy_steadiness_pct', 0)}% ({report.get('dynamics_verdict', 'Balanced')})\n"
+                f"- Vocal Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')} ({report.get('take_range_semitones', 0)} semitones)\n"
+                f"- Key Shift: {report.get('current_key_shift', 0):+d} semitones (Recommended: {report.get('recommended_key_shift', 0):+d})\n"
+                f"\nKey Take Observations:\n{feedback_str}\n"
+                f"\nChronological Highlights:\n{h_str}\n"
+                f"\nChronological Focus Moments:\n{s_str}\n"
             )
+
+        if debrief_text:
+            prompt += f"\nDebrief You Already Delivered for this Take:\n\"\"\"{debrief_text.strip()}\"\"\"\n"
+
         prompt += "<|im_end|>\n"
 
-        # Add recent history (last 4 turns)
-        for turn in history[-4:]:
+        # Prior history turns (exclude the trailing turn if it matches user_msg to avoid duplicate tokens)
+        prior_history = history[:-1] if (history and history[-1].get("role") == "user" and history[-1].get("content") == user_msg) else history
+        for turn in prior_history[-4:]:
             role = turn.get("role", "user")
             content = turn.get("content", "")
             prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"

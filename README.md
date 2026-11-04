@@ -12,7 +12,7 @@
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-00f0ff.svg)](LICENSE)
 [![Platform: Linux & Windows](https://img.shields.io/badge/Platform-Linux%20(AppImage)%20%7C%20Windows-orange.svg)](https://github.com/Todd0042/tiki-rehearsal-lounge/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-39ff14.svg)]()
-[![Tests: 32 Passed](https://img.shields.io/badge/Tests-32%20Passing-brightgreen.svg)]()
+[![Tests: 34 Passed](https://img.shields.io/badge/Tests-34%20Passing-brightgreen.svg)]()
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Creator-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/todd0042)
 
 > **Your personal vocal gym, pitch calibration laboratory, and post-take performance report card studio — companion to Tiki Karaoke or 100% standalone.**
