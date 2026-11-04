@@ -468,7 +468,9 @@ class OfflineVocalCoach:
         report_data: Dict[str, Any],
         track_info: Optional[Dict[str, Any]] = None,
         profile_data: Optional[Dict[str, Any]] = None,
-        progression_data: Optional[Dict[str, Any]] = None
+        progression_data: Optional[Dict[str, Any]] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None,
+        toc: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Synthesizes raw DSP metrics into an encouraging, pedagogical debrief

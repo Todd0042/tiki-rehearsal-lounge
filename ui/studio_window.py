@@ -2867,39 +2867,51 @@ class StudioCockpitWindow:
         self.lbl_ai_debrief_text.config(text="✦ Maestro Tiki is analyzing your take metrics offline...", fg=COLOR_CYAN)
 
         def _worker():
-            track_title = self.selected_track.get("title", "Rehearsal Track") if self.selected_track else "Rehearsal Track"
-            progression_data = self.progression_db.build_llm_progression_context(
-                track_title=track_title,
-                current_score=report.overall_score,
-                current_pitch_acc=report.pitch_accuracy_pct,
-                current_breath=report.breath_support_pct
-            )
-            profile_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
-            lyric_dict = self._last_lyric_alignment.to_dict() if self._last_lyric_alignment else None
-            toc_dict = load_take_toc(self._last_take_dir) if self._last_take_dir else None
-            debrief = self.offline_coach.generate_take_debrief(
-                report.to_dict(),
-                self.selected_track,
-                profile_dict,
-                progression_data=progression_data,
-                lyric_alignment=lyric_dict,
-                toc=toc_dict
-            )
-            self._last_debrief_text = debrief
-            # Record take in progression database
-            self.progression_db.record_take(
-                track_title=track_title,
-                overall_score=report.overall_score,
-                pitch_accuracy_pct=report.pitch_accuracy_pct,
-                intonation_cents=report.intonation_cents,
-                rhythm_offset_ms=report.rhythm_offset_ms,
-                breath_support_pct=report.breath_support_pct,
-                singers_formant_ratio=report.singers_formant_ratio,
-                balanced_onsets_pct=report.balanced_onsets_pct,
-                track_id=self.selected_track.get("id", 0) if self.selected_track else 0,
-                track_artist=self.selected_track.get("artist", "") if self.selected_track else "",
-                key_shift=self.current_key_shift
-            )
+            try:
+                track_title = self.selected_track.get("title", "Rehearsal Track") if self.selected_track else "Rehearsal Track"
+                progression_data = self.progression_db.build_llm_progression_context(
+                    track_title=track_title,
+                    current_score=report.overall_score,
+                    current_pitch_acc=report.pitch_accuracy_pct,
+                    current_breath=report.breath_support_pct
+                )
+                profile_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
+                lyric_dict = self._last_lyric_alignment.to_dict() if self._last_lyric_alignment else None
+                toc_dict = load_take_toc(self._last_take_dir) if self._last_take_dir else None
+                debrief = self.offline_coach.generate_take_debrief(
+                    report.to_dict(),
+                    self.selected_track,
+                    profile_dict,
+                    progression_data=progression_data,
+                    lyric_alignment=lyric_dict,
+                    toc=toc_dict
+                )
+                self._last_debrief_text = debrief
+                # Record take in progression database
+                self.progression_db.record_take(
+                    track_title=track_title,
+                    overall_score=report.overall_score,
+                    pitch_accuracy_pct=report.pitch_accuracy_pct,
+                    intonation_cents=report.intonation_cents,
+                    rhythm_offset_ms=report.rhythm_offset_ms,
+                    breath_support_pct=report.breath_support_pct,
+                    singers_formant_ratio=report.singers_formant_ratio,
+                    balanced_onsets_pct=report.balanced_onsets_pct,
+                    track_id=self.selected_track.get("id", 0) if self.selected_track else 0,
+                    track_artist=self.selected_track.get("artist", "") if self.selected_track else "",
+                    key_shift=self.current_key_shift
+                )
+            except Exception as e:
+                import traceback
+                print(f"[StudioWindow] AI debrief error: {e}", file=sys.stderr)
+                traceback.print_exc()
+                debrief = self.offline_coach._generate_rule_based_debrief(
+                    report.to_dict(),
+                    self.selected_track,
+                    self.vocal_profile.to_dict() if self.vocal_profile else None,
+                    lyric_alignment=self._last_lyric_alignment.to_dict() if self._last_lyric_alignment else None
+                )
+                self._last_debrief_text = debrief
 
             def _update():
                 self.lbl_ai_debrief_text.config(text=debrief, fg=COLOR_TEXT_MAIN)
@@ -2938,19 +2950,26 @@ class StudioCockpitWindow:
         self.chat_history.append({"role": "user", "content": msg})
 
         def _worker():
-            rep_dict = self._last_take_report.to_dict() if self._last_take_report else None
-            debrief_ctx = getattr(self, "_last_debrief_text", None)
-            lyric_dict = self._last_lyric_alignment.to_dict() if getattr(self, "_last_lyric_alignment", None) else None
-            toc_dict = load_take_toc(self._last_take_dir) if getattr(self, "_last_take_dir", None) else None
-            reply = self.offline_coach.chat_with_coach(
-                msg,
-                self.chat_history,
-                rep_dict,
-                self.selected_track,
-                debrief_text=debrief_ctx,
-                lyric_alignment=lyric_dict,
-                toc=toc_dict
-            )
+            try:
+                rep_dict = self._last_take_report.to_dict() if self._last_take_report else None
+                debrief_ctx = getattr(self, "_last_debrief_text", None)
+                lyric_dict = self._last_lyric_alignment.to_dict() if getattr(self, "_last_lyric_alignment", None) else None
+                toc_dict = load_take_toc(self._last_take_dir) if getattr(self, "_last_take_dir", None) else None
+                reply = self.offline_coach.chat_with_coach(
+                    msg,
+                    self.chat_history,
+                    rep_dict,
+                    self.selected_track,
+                    debrief_text=debrief_ctx,
+                    lyric_alignment=lyric_dict,
+                    toc=toc_dict
+                )
+            except Exception as e:
+                import traceback
+                print(f"[StudioWindow] Chat error: {e}", file=sys.stderr)
+                traceback.print_exc()
+                reply = "Coach Tiki: Keep focusing on forward resonance and relaxed, diaphragmatic breath support!"
+
             self.chat_history.append({"role": "assistant", "content": reply})
 
             def _update():
