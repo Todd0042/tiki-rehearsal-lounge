@@ -131,12 +131,24 @@ class TestOfflineCoach(unittest.TestCase):
         ]
         debrief_txt = "🔬 Acoustic Diagnosis: Solid support. 🛠️ Targeted Micro-Drill: Staccato."
 
+        lyric_alignment = {
+            "status": "aligned",
+            "word_accuracy_pct": 95.0,
+            "total_lines": 8,
+            "lines_covered": 8,
+            "summary_text": "All 8 lines delivered on cue.",
+            "line_details": [
+                {"timestamp": "0:12", "line": "Just a small town girl", "sung": True, "sync_offset_ms": -10.0, "sync_verdict": "Pocket"}
+            ]
+        }
+
         prompt = self.coach._build_chat_prompt(
             user_msg,
             history,
             report,
             track,
-            debrief_text=debrief_txt
+            debrief_text=debrief_txt,
+            lyric_alignment=lyric_alignment
         )
 
         # 1. Timing & Performer telemetry metrics must be present
@@ -151,7 +163,12 @@ class TestOfflineCoach(unittest.TestCase):
         self.assertIn("Journey", prompt)
         self.assertIn("Acoustic Diagnosis: Solid support", prompt)
 
-        # 3. User message must NOT be duplicated consecutively
+        # 3. Partitioned Lyrics & Grounding Directive must be present
+        self.assertIn("[PARTITION: LYRICS_ALIGNMENT]", prompt)
+        self.assertIn("Just a small town girl", prompt)
+        self.assertIn("CRITICAL GROUNDING DIRECTIVE", prompt)
+
+        # 4. User message must NOT be duplicated consecutively
         self.assertEqual(prompt.count("how was my timing for lines?"), 1)
 
     def test_debrief_prompt_assembly(self):

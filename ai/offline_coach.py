@@ -475,14 +475,17 @@ class OfflineVocalCoach:
         incorporating phrase-level moments and vocal progression trajectory.
         """
         if not self.load_engine():
-            return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
+            return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data, lyric_alignment=lyric_alignment)
 
         # Build prompt
-        prompt = self._build_debrief_prompt(report_data, track_info, profile_data, progression_data)
+        prompt = self._build_debrief_prompt(
+            report_data, track_info, profile_data, progression_data,
+            lyric_alignment=lyric_alignment, toc=toc
+        )
         result = self._query_completion(prompt, max_tokens=650, temperature=0.7)
         if result:
             return result
-        return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data)
+        return self._generate_rule_based_debrief(report_data, track_info, profile_data, progression_data, lyric_alignment=lyric_alignment)
 
     def chat_with_coach(
         self,
@@ -490,10 +493,12 @@ class OfflineVocalCoach:
         conversation_history: List[Dict[str, str]],
         report_data: Optional[Dict[str, Any]] = None,
         track_info: Optional[Dict[str, Any]] = None,
-        debrief_text: Optional[str] = None
+        debrief_text: Optional[str] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None,
+        toc: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Interactive conversational reply regarding the take and vocal mechanics.
+        Interactive conversational reply regarding the take, lyrics, and vocal mechanics.
         """
         if not self.load_engine():
             if not self.is_installed():
@@ -511,7 +516,9 @@ class OfflineVocalCoach:
             conversation_history,
             report_data,
             track_info,
-            debrief_text=debrief_text
+            debrief_text=debrief_text,
+            lyric_alignment=lyric_alignment,
+            toc=toc
         )
         result = self._query_completion(
             prompt,
@@ -528,7 +535,9 @@ class OfflineVocalCoach:
         report: Dict[str, Any],
         track_info: Optional[Dict[str, Any]],
         profile: Optional[Dict[str, Any]],
-        progression_data: Optional[Dict[str, Any]] = None
+        progression_data: Optional[Dict[str, Any]] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None,
+        toc: Optional[Dict[str, Any]] = None
     ) -> str:
         track_title = track_info.get("title", "Rehearsal Song") if track_info else "Rehearsal Song"
         track_artist = track_info.get("artist", "") if track_info else ""
@@ -598,6 +607,7 @@ class OfflineVocalCoach:
             f"{feedback_section}"
             f"{phrase_section}\n"
             f"{prog_section}\n"
+            f"{f'[PARTITION: LYRICS_ALIGNMENT]' + chr(10) + '- Status: ' + lyric_alignment.get('status', 'unavailable') + chr(10) + '- Summary: ' + lyric_alignment.get('summary_text', '') + chr(10) if lyric_alignment and lyric_alignment.get('status') == 'aligned' else ''}"
             f"CRITICAL INSTRUCTION: The singer ALREADY sees the raw timestamped highlight list and struggle list in the UI cards directly above your text. "
             f"DO NOT duplicate or re-list them. Deliver your unique, expert vocal masterclass synthesis with:\n"
             f"1. 🔬 **Acoustic Diagnosis (The Root-Cause 'Why')**: Explain the underlying vocal fold physiology, airflow, attack scooping, and vocal tract resonance behind my take metrics.\n"
@@ -615,7 +625,9 @@ class OfflineVocalCoach:
         history: List[Dict[str, str]],
         report: Optional[Dict[str, Any]],
         track_info: Optional[Dict[str, Any]],
-        debrief_text: Optional[str] = None
+        debrief_text: Optional[str] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None,
+        toc: Optional[Dict[str, Any]] = None
     ) -> str:
         prompt = f"<|im_start|>system\n{CHAT_SYSTEM_PROMPT}\n"
         track_title = track_info.get("title", "") if track_info else ""
@@ -640,9 +652,20 @@ class OfflineVocalCoach:
                 else "Straight-tone / Minimal vibrato"
             )
 
+            lyric_status = lyric_alignment.get("status", "unavailable") if lyric_alignment else "unavailable"
+            lyric_summary = lyric_alignment.get("summary_text", "No synchronized lyrics were tracked for this rehearsal take.") if lyric_alignment else "No synchronized lyrics were tracked for this rehearsal take."
+            lyric_details = lyric_alignment.get("line_details", []) if lyric_alignment else []
+            lyric_sample_str = ""
+            if lyric_details:
+                lyric_sample_str = "\n".join([
+                    f"• [{l.get('timestamp', '0:00')}] \"{l.get('line', '')}\" -> {'Sung (' + str(l.get('sync_offset_ms', 0)) + 'ms ' + str(l.get('sync_verdict', '')) + ')' if l.get('sung') else 'Missed'}"
+                    for l in lyric_details[:6]
+                ])
+
             prompt += (
                 f"\n=== SINGER'S LATEST PERFORMANCE TELEMETRY ===\n"
                 f"Track: '{track_title}' {f'by {track_artist}' if track_artist else ''}\n"
+                f"[PARTITION: ACOUSTIC_CORE]\n"
                 f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
                 f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% (within ±50¢)\n"
                 f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
@@ -657,8 +680,16 @@ class OfflineVocalCoach:
                 f"- Vocal Range Covered: {report.get('take_min_note', 'N/A')} to {report.get('take_max_note', 'N/A')} ({report.get('take_range_semitones', 0)} semitones)\n"
                 f"- Key Shift: {report.get('current_key_shift', 0):+d} semitones (Recommended: {report.get('recommended_key_shift', 0):+d})\n"
                 f"\nKey Take Observations:\n{feedback_str}\n"
-                f"\nChronological Highlights:\n{h_str}\n"
-                f"\nChronological Focus Moments:\n{s_str}\n"
+                f"\n[PARTITION: PHRASE_TIMELINE]\n"
+                f"Highlights:\n{h_str}\n"
+                f"Focus Moments:\n{s_str}\n"
+                f"\n[PARTITION: LYRICS_ALIGNMENT]\n"
+                f"Status: {lyric_status}\n"
+                f"Summary: {lyric_summary}\n"
+                f"{f'Tracked Lines Sample:' + chr(10) + lyric_sample_str + chr(10) if lyric_sample_str else ''}"
+                f"\nCRITICAL GROUNDING DIRECTIVE:\n"
+                f"1. When the user asks about lyrics, words, or song phrasing, ground your answer strictly in [PARTITION: LYRICS_ALIGNMENT]. Quote the exact target and sung words.\n"
+                f"2. If [PARTITION: LYRICS_ALIGNMENT] status is 'unavailable' or 'reference_only', explicitly tell the user that lyric transcription was not active for this rehearsal take, and NEVER guess lyrics from pitch or tone!\n"
             )
 
         if debrief_text:
@@ -681,7 +712,8 @@ class OfflineVocalCoach:
         report: Dict[str, Any],
         track_info: Optional[Dict[str, Any]],
         profile: Optional[Dict[str, Any]],
-        progression_data: Optional[Dict[str, Any]] = None
+        progression_data: Optional[Dict[str, Any]] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None
     ) -> str:
         """High-grade pedagogical debrief synthesis providing unique non-duplicative analysis, diagnosis, and micro-drills."""
         score = report.get("overall_score", 0)
@@ -699,6 +731,10 @@ class OfflineVocalCoach:
             f"**{report.get('attack_velocity_verdict', 'clean direct attacks')}** and a **{report.get('dynamic_arc_verdict', 'natural dynamic arc')}**.\n"
             "*(Review the timestamped highlight and focus cards above for your exact note breakdowns.)*"
         )
+
+        if lyric_alignment and lyric_alignment.get("status") == "aligned":
+            cov = lyric_alignment.get("word_accuracy_pct", 0)
+            lines.append(f"📖 **Lyric Phrasing**: {lyric_alignment.get('lines_covered', 0)}/{lyric_alignment.get('total_lines', 0)} lines on-cue ({cov:.0f}% coverage).")
 
         # 1. Acoustic Diagnosis (The Root-Cause 'Why')
         lines.append("\n🔬 **Acoustic Diagnosis (Underlying Physiology)**:")

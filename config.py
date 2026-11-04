@@ -31,6 +31,9 @@ STUDIO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 STUDIO_CONFIG_PATH = STUDIO_CONFIG_DIR / "config.json"
 
 VOCAL_PROFILE_PATH = STUDIO_CONFIG_DIR / "vocal_profile.json"
+LYRICS_CACHE_DB_PATH = STUDIO_CONFIG_DIR / "lyrics_cache.db"
+TAKES_DIR = STUDIO_CONFIG_DIR / "takes"
+TAKES_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_TAKES_DIR = Path(tempfile.gettempdir()) / "tiki_rehearsal_takes"
 TEMP_TAKES_DIR.mkdir(parents=True, exist_ok=True)
 

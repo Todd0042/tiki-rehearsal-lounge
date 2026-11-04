@@ -60,9 +60,11 @@ from audio.calibration import (
     VocalProfile,
     hz_to_midi,
     midi_to_note_name
-)
 from audio.player import RehearsalPlayer
 from audio.vocal_analyzer import VocalTakeAnalyzer, TakeAnalysisReport
+from audio.parallel_analyzer import ParallelVocalTakeAnalyzer
+from audio.lyric_manager import LyricManager, LyricTrack, LyricAlignmentReport
+from storage.take_partitions import save_take_partitions, load_take_toc
 from audio.tone_generator import (
     tone_synth,
     parse_target_notes,
@@ -103,6 +105,11 @@ class StudioCockpitWindow:
         self.calibrator = VocalCalibrationManager()
         self.vocal_profile: Optional[VocalProfile] = self.calibrator.load_profile()
         self.analyzer = VocalTakeAnalyzer(vocal_profile=self.vocal_profile)
+        self.parallel_analyzer = ParallelVocalTakeAnalyzer(vocal_profile=self.vocal_profile)
+        self.lyric_manager = LyricManager()
+        self._current_lyric_track: Optional[LyricTrack] = None
+        self._last_lyric_alignment: Optional[LyricAlignmentReport] = None
+        self._last_take_dir: Optional[Path] = None
         self.recorder = AudioRecorder(
             on_level=self._on_mic_level,
             on_pitch=self._on_mic_pitch
@@ -2325,17 +2332,27 @@ class StudioCockpitWindow:
             if sa_meta and sa_meta.get("local_path"):
                 ref_path = Path(sa_meta["local_path"])
 
-        report = self.analyzer.analyze_take(
+        report, lyric_alignment = self.parallel_analyzer.analyze_take_parallel(
             singer_wav=take_wav,
             reference_wav=ref_path,
             playback_audio_path=playback_path,
             key_shift=self.current_key_shift,
+            lyric_track=self._current_lyric_track,
             progress_cb=_prog_cb
         )
 
-        self.root.after_idle(lambda: self._display_report_card(report))
+        self._last_lyric_alignment = lyric_alignment
+        take_dir = save_take_partitions(
+            report=report,
+            lyric_report=lyric_alignment,
+            track_info=self.selected_track,
+            take_wav=take_wav
+        )
+        self._last_take_dir = take_dir
 
-    def _display_report_card(self, report: TakeAnalysisReport):
+        self.root.after_idle(lambda: self._display_report_card(report, lyric_alignment))
+
+    def _display_report_card(self, report: TakeAnalysisReport, lyric_alignment: Optional[LyricAlignmentReport] = None):
         # Hide analysis progress bar
         if hasattr(self, "analysis_prog_frame") and self.analysis_prog_frame.winfo_exists():
             self.analysis_prog_frame.pack_forget()
@@ -2392,6 +2409,27 @@ class StudioCockpitWindow:
                 wraplength=avail_wrap
             )
             msg_lbl.pack(side="left", fill="x", expand=True)
+
+        # 1b. Add Lyric Phrasing Card if aligned
+        if lyric_alignment and lyric_alignment.status == "aligned":
+            row_l = tk.Frame(self.coach_feedback_container, bg="#140b20")
+            row_l.pack(fill="x", pady=3, anchor="w")
+            tk.Label(
+                row_l,
+                text="📖",
+                font=("Helvetica", 9, "bold"),
+                fg=COLOR_CYAN,
+                bg="#140b20"
+            ).pack(side="left", anchor="n", padx=(0, 6))
+            tk.Label(
+                row_l,
+                text=f"Lyric Phrasing Alignment: {lyric_alignment.summary_text}",
+                font=("Helvetica", 9),
+                fg="#a2e8dd",
+                bg="#140b20",
+                justify="left",
+                wraplength=avail_wrap
+            ).pack(side="left", fill="x", expand=True)
 
         # 2. Add Timestamped Phrase Highlights Card
         if report.phrase_highlights:
@@ -2836,11 +2874,15 @@ class StudioCockpitWindow:
                 current_breath=report.breath_support_pct
             )
             profile_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
+            lyric_dict = self._last_lyric_alignment.to_dict() if self._last_lyric_alignment else None
+            toc_dict = load_take_toc(self._last_take_dir) if self._last_take_dir else None
             debrief = self.offline_coach.generate_take_debrief(
                 report.to_dict(),
                 self.selected_track,
                 profile_dict,
-                progression_data=progression_data
+                progression_data=progression_data,
+                lyric_alignment=lyric_dict,
+                toc=toc_dict
             )
             self._last_debrief_text = debrief
             # Record take in progression database
@@ -2897,12 +2939,16 @@ class StudioCockpitWindow:
         def _worker():
             rep_dict = self._last_take_report.to_dict() if self._last_take_report else None
             debrief_ctx = getattr(self, "_last_debrief_text", None)
+            lyric_dict = self._last_lyric_alignment.to_dict() if getattr(self, "_last_lyric_alignment", None) else None
+            toc_dict = load_take_toc(self._last_take_dir) if getattr(self, "_last_take_dir", None) else None
             reply = self.offline_coach.chat_with_coach(
                 msg,
                 self.chat_history,
                 rep_dict,
                 self.selected_track,
-                debrief_text=debrief_ctx
+                debrief_text=debrief_ctx,
+                lyric_alignment=lyric_dict,
+                toc=toc_dict
             )
             self.chat_history.append({"role": "assistant", "content": reply})
 
@@ -3071,6 +3117,25 @@ class StudioCockpitWindow:
                         self._sync_warmup_to_current_key()
                     self.dispatch_to_main(_ui)
             threading.Thread(target=_scan_worker, daemon=True).start()
+
+        # In background, resolve synced lyrics so they are ready before rehearsal completes
+        self._current_lyric_track = None
+        self._last_lyric_alignment = None
+
+        def _lyrics_worker():
+            try:
+                lt = self.lyric_manager.resolve_track_lyrics(track)
+                self._current_lyric_track = lt
+                if lt and lt.lines:
+                    def _ui_lyr():
+                        self.lbl_status.config(
+                            text=f"Loaded '{track.get('title')}' • Synced lyrics ready ({len(lt.lines)} lines)."
+                        )
+                    self.dispatch_to_main(_ui_lyr)
+            except Exception as e:
+                print(f"[StudioWindow] Background lyric load error: {e}", file=sys.stderr)
+
+        threading.Thread(target=_lyrics_worker, daemon=True).start()
 
     def _on_select_track(self):
         """Triggered on Double-Click or 'Load Selected Song into Cockpit' button."""
