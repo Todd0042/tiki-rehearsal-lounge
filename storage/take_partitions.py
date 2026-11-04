@@ -252,3 +252,112 @@ def load_take_partition(take_dir: Path, partition_name: str) -> Optional[Dict[st
             return json.load(f)
     except Exception:
         return None
+
+
+def get_most_recent_take_dir(base_dir: Optional[Path] = None) -> Optional[Path]:
+    """
+    Finds the most recently recorded rehearsal take directory that contains a valid toc.json.
+    """
+    target_base = base_dir or TAKES_DIR
+    if not target_base.is_dir():
+        return None
+
+    valid_takes: List[Tuple[float, Path]] = []
+    try:
+        for entry in target_base.iterdir():
+            if entry.is_dir() and (entry / "toc.json").is_file() and (entry / "acoustic_core.json").is_file():
+                mtime = (entry / "toc.json").stat().st_mtime
+                valid_takes.append((mtime, entry))
+    except Exception as e:
+        print(f"[TakePartitions] Error scanning takes directory: {e}", file=sys.stderr)
+        return None
+
+    if not valid_takes:
+        return None
+
+    # Sort newest first
+    valid_takes.sort(key=lambda x: x[0], reverse=True)
+    return valid_takes[0][1]
+
+
+def load_take_report_and_lyrics(
+    take_dir: Path
+) -> Tuple[Optional[TakeAnalysisReport], Optional[LyricAlignmentReport], Optional[Dict[str, Any]]]:
+    """
+    Reconstructs TakeAnalysisReport, LyricAlignmentReport, and track info from a take directory.
+    """
+    take_p = Path(take_dir)
+    if not take_p.is_dir():
+        return None, None, None
+
+    toc = load_take_toc(take_p) or {}
+    core = load_take_partition(take_p, "acoustic_core")
+    if not core:
+        return None, None, None
+
+    phrases = load_take_partition(take_p, "phrase_timeline") or {}
+    lyrics = load_take_partition(take_p, "lyrics_alignment") or {}
+
+    report = TakeAnalysisReport(
+        pitch_accuracy_pct=core.get("pitch_accuracy_pct", 0.0),
+        intonation_cents=core.get("intonation_cents", 0.0),
+        intonation_verdict=core.get("intonation_verdict", "N/A"),
+        rhythm_offset_ms=core.get("rhythm_offset_ms", 0.0),
+        rhythm_verdict=core.get("rhythm_verdict", "N/A"),
+        vibrato_rate_hz=core.get("vibrato_rate_hz", 0.0),
+        vibrato_depth_cents=core.get("vibrato_depth_cents", 0.0),
+        vibrato_present=core.get("vibrato_present", False),
+        take_min_note=core.get("take_min_note", "N/A"),
+        take_max_note=core.get("take_max_note", "N/A"),
+        take_range_semitones=core.get("take_range_semitones", 0.0),
+        current_key_shift=core.get("current_key_shift", 0),
+        recommended_key_shift=core.get("recommended_key_shift", 0),
+        key_recommendation_reason=core.get("key_recommendation_reason", ""),
+        resonance_verdict=core.get("resonance_verdict", "Balanced"),
+        singers_formant_ratio=core.get("singers_formant_ratio", 0.0),
+        breath_support_pct=core.get("breath_support_pct", 0.0),
+        breath_support_verdict=core.get("breath_support_verdict", "N/A"),
+        onset_attack_verdict=core.get("onset_attack_verdict", "N/A"),
+        balanced_onsets_pct=core.get("balanced_onsets_pct", 0.0),
+        energy_steadiness_pct=core.get("energy_steadiness_pct", 0.0),
+        dynamics_verdict=core.get("dynamics_verdict", "N/A"),
+        sibilance_ratio=core.get("sibilance_ratio", 0.0),
+        sibilance_verdict=core.get("sibilance_verdict", "N/A"),
+        vocal_fry_pct=core.get("vocal_fry_pct", 0.0),
+        vocal_fry_verdict=core.get("vocal_fry_verdict", "N/A"),
+        overall_score=core.get("overall_score", 0),
+        coach_feedback=core.get("coach_feedback", []),
+        phrase_highlights=phrases.get("phrase_highlights", []),
+        phrase_struggles=phrases.get("phrase_struggles", []),
+        all_phrases=phrases.get("all_phrases", []),
+        pitch_scoop_pct=core.get("pitch_scoop_pct", 0.0),
+        attack_velocity_verdict=core.get("attack_velocity_verdict", "Clean"),
+        dynamic_contrast_db=core.get("dynamic_contrast_db", 0.0),
+        dynamic_arc_verdict=core.get("dynamic_arc_verdict", "Natural"),
+        vibrato_bloom_ms=core.get("vibrato_bloom_ms", 0.0),
+        vibrato_style_verdict=core.get("vibrato_style_verdict", "Natural"),
+        timeline_series=core.get("timeline_series", {}),
+        vocal_registers=core.get("vocal_registers", {}),
+        intonation_bias=core.get("intonation_bias", {})
+    )
+
+    lyric_alignment = LyricAlignmentReport(
+        status=lyrics.get("status", "unavailable"),
+        word_accuracy_pct=lyrics.get("word_accuracy_pct", 0.0),
+        word_error_rate_pct=lyrics.get("word_error_rate_pct", 0.0),
+        total_lines=lyrics.get("total_lines", 0),
+        lines_covered=lyrics.get("lines_covered", 0),
+        timing_offset_ms=lyrics.get("timing_offset_ms", 0.0),
+        line_details=lyrics.get("line_details", []),
+        missed_phrases=lyrics.get("missed_phrases", []),
+        summary_text=lyrics.get("summary_text", ""),
+        total_target_words=lyrics.get("total_target_words", 0),
+        total_sung_words=lyrics.get("total_sung_words", 0),
+        words_matched_count=lyrics.get("words_matched_count", 0),
+        missed_words=lyrics.get("missed_words", []),
+        word_timeline=lyrics.get("word_timeline", []),
+        diction_clarity_pct=lyrics.get("diction_clarity_pct", 0.0)
+    )
+
+    track_info = toc.get("track", {})
+    return report, lyric_alignment, track_info

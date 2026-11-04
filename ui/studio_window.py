@@ -65,7 +65,12 @@ from audio.player import RehearsalPlayer
 from audio.vocal_analyzer import VocalTakeAnalyzer, TakeAnalysisReport
 from audio.parallel_analyzer import ParallelVocalTakeAnalyzer
 from audio.lyric_manager import LyricManager, LyricTrack, LyricAlignmentReport
-from storage.take_partitions import save_take_partitions, load_take_toc
+from storage.take_partitions import (
+    save_take_partitions,
+    load_take_toc,
+    get_most_recent_take_dir,
+    load_take_report_and_lyrics
+)
 from audio.tone_generator import (
     tone_synth,
     parse_target_notes,
@@ -175,6 +180,9 @@ class StudioCockpitWindow:
 
         # Handle clean close
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Automatically reload and display the most recent rehearsal take on startup
+        self.root.after(80, self._load_most_recent_take_on_startup)
 
     def dispatch_to_main(self, fn: Callable[[], None]):
         """Thread-safe dispatcher for executing UI updates on the Tkinter main thread."""
@@ -2353,7 +2361,12 @@ class StudioCockpitWindow:
 
         self.root.after_idle(lambda: self._display_report_card(report, lyric_alignment))
 
-    def _display_report_card(self, report: TakeAnalysisReport, lyric_alignment: Optional[LyricAlignmentReport] = None):
+    def _display_report_card(
+        self,
+        report: TakeAnalysisReport,
+        lyric_alignment: Optional[LyricAlignmentReport] = None,
+        is_reloaded_take: bool = False
+    ):
         # Hide analysis progress bar
         if hasattr(self, "analysis_prog_frame") and self.analysis_prog_frame.winfo_exists():
             self.analysis_prog_frame.pack_forget()
@@ -2534,14 +2547,78 @@ class StudioCockpitWindow:
             )
             body_lbl.pack(fill="x", pady=(4, 0))
 
-        # 5. Automatically trigger AI Take Debriefing
-        self._trigger_ai_take_debrief(report)
+        # 5. Automatically trigger or restore AI Take Debriefing
+        if is_reloaded_take and self._last_take_dir:
+            debrief_file = Path(self._last_take_dir) / "coach_debrief.txt"
+            if debbrief_text := (debrief_file.read_text(encoding="utf-8").strip() if debrief_file.is_file() else ""):
+                self._last_debrief_text = debbrief_text
+                self.lbl_ai_debrief_text.config(text=debbrief_text, fg=COLOR_TEXT_MAIN)
+                self._refresh_ai_coach_view()
+            else:
+                self._trigger_ai_take_debrief(report, record_progression=False)
+        else:
+            self._trigger_ai_take_debrief(report, record_progression=True)
 
         self.root.update_idletasks()
         if hasattr(self, "report_canvas"):
             self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
 
-        self.lbl_status.config(text="Performance analysis complete. Great work!")
+        status_msg = (
+            f"Reloaded previous take for '{self.selected_track.get('title', 'rehearsal') if self.selected_track else 'rehearsal'}' (Score {report.overall_score}/100)."
+            if is_reloaded_take
+            else "Performance analysis complete. Great work!"
+        )
+        self.lbl_status.config(text=status_msg)
+
+    def _load_most_recent_take_on_startup(self):
+        """
+        On application startup, automatically reloads and displays the most recent rehearsal take
+        in the cockpit report card and AI debrief view so singers can immediately continue
+        their vocal progression.
+        """
+        try:
+            take_dir = get_most_recent_take_dir()
+            if not take_dir or not take_dir.is_dir():
+                return
+
+            report, lyric_alignment, track_info = load_take_report_and_lyrics(take_dir)
+            if not report:
+                return
+
+            self._last_take_dir = take_dir
+            take_wav = take_dir / "singer_take.wav"
+            if take_wav.is_file():
+                self.current_take_wav = take_wav
+
+            # Set up session key shift if present
+            self.current_key_shift = report.current_key_shift
+            self._update_key_display()
+
+            # Find matching track in local library if possible
+            track_title = track_info.get("title", "") if track_info else ""
+            matching_tracks = self.db.search_tracks(track_title) if track_title else []
+            if matching_tracks:
+                # Load matched library track into cockpit so backing audio & lyrics are linked
+                self._load_track_into_cockpit(matching_tracks[0])
+            elif track_info:
+                # Set up cockpit headers with the stored take track metadata
+                self.selected_track = track_info
+                self.lbl_track_title.config(text=track_info.get("title", "Rehearsal Take"))
+                self.lbl_track_artist.config(text=track_info.get("artist", ""))
+                dur = int(track_info.get("duration", 0))
+                dur_min, dur_sec = dur // 60, dur % 60
+                self.lbl_track_meta.config(
+                    text=f"Duration: {dur_min}:{dur_sec:02d}  •  Last Take: {take_dir.name}"
+                )
+                self.notebook.select(self.tab_studio)
+
+            # Display the report card as though the take just took place
+            self._display_report_card(report, lyric_alignment, is_reloaded_take=True)
+            self.lbl_status.config(
+                text=f"Loaded previous take for '{track_title or 'rehearsal'}' (Score {report.overall_score}/100). Ready for your next take!"
+            )
+        except Exception as e:
+            print(f"[StudioWindow] Error reloading recent take on startup: {e}", file=sys.stderr)
 
     def _on_toggle_drawer(self):
         if not self._drawer_expanded:
@@ -2853,7 +2930,7 @@ class StudioCockpitWindow:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _trigger_ai_take_debrief(self, report: TakeAnalysisReport):
+    def _trigger_ai_take_debrief(self, report: TakeAnalysisReport, record_progression: bool = True):
         self._refresh_ai_coach_view()
         if not self.offline_coach.is_installed():
             return
@@ -2887,20 +2964,29 @@ class StudioCockpitWindow:
                     toc=toc_dict
                 )
                 self._last_debrief_text = debrief
-                # Record take in progression database
-                self.progression_db.record_take(
-                    track_title=track_title,
-                    overall_score=report.overall_score,
-                    pitch_accuracy_pct=report.pitch_accuracy_pct,
-                    intonation_cents=report.intonation_cents,
-                    rhythm_offset_ms=report.rhythm_offset_ms,
-                    breath_support_pct=report.breath_support_pct,
-                    singers_formant_ratio=report.singers_formant_ratio,
-                    balanced_onsets_pct=report.balanced_onsets_pct,
-                    track_id=self.selected_track.get("id", 0) if self.selected_track else 0,
-                    track_artist=self.selected_track.get("artist", "") if self.selected_track else "",
-                    key_shift=self.current_key_shift
-                )
+
+                # Persist generated debrief into take partition folder for instant retrieval
+                if self._last_take_dir and Path(self._last_take_dir).is_dir():
+                    try:
+                        (Path(self._last_take_dir) / "coach_debrief.txt").write_text(debrief, encoding="utf-8")
+                    except Exception:
+                        pass
+
+                # Record take in progression database only if it's a new take
+                if record_progression:
+                    self.progression_db.record_take(
+                        track_title=track_title,
+                        overall_score=report.overall_score,
+                        pitch_accuracy_pct=report.pitch_accuracy_pct,
+                        intonation_cents=report.intonation_cents,
+                        rhythm_offset_ms=report.rhythm_offset_ms,
+                        breath_support_pct=report.breath_support_pct,
+                        singers_formant_ratio=report.singers_formant_ratio,
+                        balanced_onsets_pct=report.balanced_onsets_pct,
+                        track_id=self.selected_track.get("id", 0) if self.selected_track else 0,
+                        track_artist=self.selected_track.get("artist", "") if self.selected_track else "",
+                        key_shift=self.current_key_shift
+                    )
             except Exception as e:
                 import traceback
                 print(f"[StudioWindow] AI debrief error: {e}", file=sys.stderr)

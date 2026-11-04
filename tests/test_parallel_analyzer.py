@@ -10,7 +10,13 @@ import numpy as np
 
 from audio.parallel_analyzer import ParallelVocalTakeAnalyzer, get_optimal_worker_count
 from audio.lyric_manager import LyricTrack, LyricLine
-from storage.take_partitions import save_take_partitions, load_take_toc, load_take_partition
+from storage.take_partitions import (
+    save_take_partitions,
+    load_take_toc,
+    load_take_partition,
+    get_most_recent_take_dir,
+    load_take_report_and_lyrics
+)
 
 
 def create_synthetic_wav(file_path: Path, duration_s: float = 3.0, freq_hz: float = 440.0, sr: int = 22050):
@@ -109,6 +115,42 @@ class TestParallelAnalyzer(unittest.TestCase):
         diag_part = load_take_partition(take_dir, "vocal_health_diagnostics")
         self.assertIsNotNone(diag_part)
         self.assertIn("fatigue_risk_score", diag_part)
+
+    def test_get_most_recent_take_dir_and_reconstruction(self):
+        # Verify empty directory returns None
+        empty_dir = self.temp_path / "empty_takes"
+        empty_dir.mkdir()
+        self.assertIsNone(get_most_recent_take_dir(empty_dir))
+
+        wav_path = self.temp_path / "test_recon.wav"
+        create_synthetic_wav(wav_path, duration_s=1.2, freq_hz=440.0)
+
+        report, lyric_rep = self.analyzer.analyze_take_parallel(
+            singer_wav=wav_path,
+            key_shift=2
+        )
+        report.overall_score = 92
+        track_info = {"title": "Hotel California", "artist": "Eagles", "duration": 390}
+
+        saved_dir = save_take_partitions(
+            report=report,
+            lyric_report=lyric_rep,
+            track_info=track_info,
+            take_wav=wav_path,
+            dest_base_dir=empty_dir
+        )
+
+        most_recent = get_most_recent_take_dir(empty_dir)
+        self.assertEqual(most_recent, saved_dir)
+
+        recon_report, recon_lyrics, recon_track = load_take_report_and_lyrics(saved_dir)
+        self.assertIsNotNone(recon_report)
+        self.assertEqual(recon_report.overall_score, 92)
+        self.assertEqual(recon_report.current_key_shift, 2)
+        self.assertEqual(recon_report.pitch_accuracy_pct, report.pitch_accuracy_pct)
+        self.assertIsNotNone(recon_lyrics)
+        self.assertEqual(recon_lyrics.status, lyric_rep.status)
+        self.assertEqual(recon_track["title"], "Hotel California")
 
 
 if __name__ == "__main__":
