@@ -1,10 +1,15 @@
-# Core Audio Processing & Science
-numpy>=1.24.0
-scipy>=1.10.0
-Pillow>=13.0.0
+# Core Audio Processing & Scientific DSP (Pinned with Python-version wheel compatibility)
+numpy==2.5.4; python_version >= '3.12'
+numpy==2.2.6; python_version < '3.12'
+scipy==1.18.1; python_version >= '3.12'
+scipy==1.15.3; python_version < '3.12'
+pillow==13.0.0; python_version >= '3.11'
+pillow==11.3.0; python_version < '3.11'
 
-# Optional Python Audio Device Wrapper (app includes zero-dependency ffmpeg/pw-record fallback)
-sounddevice>=0.4.6
+# Optional Python Audio Device Wrapper & CFFI Bridge (app includes zero-dependency ffmpeg/pw-record fallback)
+sounddevice==0.5.6
+cffi==2.1.1
+pycparser==3.12
 
 # YouTube Downloader
-yt-dlp>=2024.01.01
+yt-dlp==2026.10.26

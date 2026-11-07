@@ -194,11 +194,11 @@ graph TD
 
 ## 2. Parallel Multi-Core Python DSP Analysis Pipeline
 
-Upon take completion, raw vocal audio (`singer_take.wav`) and the reference backing stem (`reference_track.wav`) enter a high-throughput, non-blocking parallel extraction pipeline designed to bypass Python's Global Interpreter Lock (GIL).
+Upon take completion, raw vocal audio (`singer_take.wav`) and the reference backing stem (`reference_track.wav`) enter a high-throughput, non-blocking parallel extraction pipeline ([audio/parallel_analyzer.py](audio/parallel_analyzer.py) and [audio/vocal_analyzer.py](audio/vocal_analyzer.py)) designed to bypass Python's Global Interpreter Lock (GIL).
 
 ### Concurrency Architecture & Dynamic Core Allocation
 
-The execution engine in `audio/parallel_analyzer.py` uses `concurrent.futures.ProcessPoolExecutor`. Rather than pinning threads or risking lockups on low-spec hardware (such as dual-core Intel Celerons) or underutilizing high-core workstations (such as 24-core or 32-core systems), worker allocation scales dynamically:
+The execution engine in [audio/parallel_analyzer.py](audio/parallel_analyzer.py) (`get_optimal_worker_count()`) uses `concurrent.futures.ProcessPoolExecutor` to dispatch 11 specialized acoustic feature workers (`_worker_pitch_chunk`, `_worker_vibrato`, `_worker_resonance`, `_worker_breath`, `_worker_attacks`, `_worker_dynamics`, `_worker_sibilance`, `_worker_fry`, `_worker_scoop`, `_worker_dynamic_arc`, and `_worker_phrase_timeline`). Rather than pinning threads or risking lockups on low-spec hardware (such as dual-core Intel Celerons) or underutilizing high-core workstations (such as 24-core or 32-core systems), worker allocation scales dynamically:
 
 ```python
 workers = max(1, min(os.cpu_count() or 4, 27))
@@ -252,7 +252,7 @@ flowchart TD
 
 ## 3. Partitioned Take Storage Engine
 
-To prevent UI stalls, avoid database bloat, and protect LLM token context windows, performance take data is saved into structured, human-readable JSON partitions under `take_recordings/<take_id>/`:
+To prevent UI stalls, avoid database bloat, and protect LLM token context windows, performance take data is serialized by [storage/take_partitions.py](storage/take_partitions.py) (`save_take_partitions()`, `load_take_toc()`, `load_take_partition()`) into structured, human-readable JSON partitions under `take_recordings/<take_id>/`:
 
 ```text
 take_recordings/
@@ -310,7 +310,7 @@ The `toc.json` file serves as the lookup directory for the application and AI co
 
 ## 4. Vocal Diagnostic Calibration Engine
 
-Human vocal classification often relies on subjective range labeling. Tiki Rehearsal Lounge applies empirical pitch analysis using normalized autocorrelation:
+Human vocal classification often relies on subjective range labeling. Tiki Rehearsal Lounge ([audio/calibration.py](audio/calibration.py) — `VocalCalibrationManager`, `extract_pitch_contour()`, `classify_voice_type()`) applies empirical pitch analysis using normalized autocorrelation:
 
 $$\text{MIDI}(f) = 69 + 12 \cdot \log_2\left(\frac{f}{440}\right)$$
 
@@ -331,7 +331,7 @@ $$\text{MIDI}(f) = 69 + 12 \cdot \log_2\left(\frac{f}{440}\right)$$
 
 ## 5. Smart Key Recommendation Engine
 
-When a track is selected, the engine evaluates the song's melodic peak demand against your calibrated ceiling:
+When a track is selected, [`VocalTakeAnalyzer.recommend_key_for_track()`](audio/vocal_analyzer.py) evaluates the song's melodic peak demand (`extract_song_melody_profile()`, `get_song_climax_note()`) against your calibrated ceiling:
 
 $$\Delta = \text{round}\left(\text{MIDI}(\text{Tessitura}_{\text{max}}) - \text{MIDI}(\text{Song}_{\text{peak}})\right)$$
 
@@ -344,7 +344,7 @@ $$\text{Shift}_{\text{clamped}} = \max(-3, \min(3, \Delta))$$
 
 ## 6. Objective Performance Take Analysis & Bleed Suppression
 
-Upon finishing a recorded take, the vocal stem is evaluated against four objective pillars:
+Upon finishing a recorded take, [`VocalTakeAnalyzer.analyze_take()`](audio/vocal_analyzer.py) evaluates the vocal stem against four objective pillars (`TakeAnalysisReport`):
 
 | Metric | Target / Safe Window | Description |
 | :--- | :--- | :--- |
@@ -354,7 +354,7 @@ Upon finishing a recorded take, the vocal stem is evaluated against four objecti
 | **Vibrato Dynamics** | $4.5 - 7.0 \text{ Hz}$ | Natural modulation frequency and depth in cents (typically $30 - 90 \text{ cents}$). Flags artificial pitch wobble or rigid straight-tone tension. |
 
 ### Acoustic Bleed Cancellation
-Microphones capture monitor and speaker bleed from the backing track. Tiki Rehearsal Lounge computes the normalized cross-correlation:
+Microphones capture monitor and speaker bleed from the backing track. [`VocalTakeAnalyzer._suppress_speaker_bleed()`](audio/vocal_analyzer.py) computes the normalized cross-correlation:
 
 $$r_{xy}[k] = \frac{\sum_n x[n] \cdot y[n-k]}{\sqrt{\sum_n x^2[n] \cdot \sum_n y^2[n]}}$$
 
@@ -366,7 +366,7 @@ When vocal energy falls below the noise threshold and matches the reference trac
 
 A common limitation in pitch-correction and scoring software is the rigid penalization of artistic styling. If a vocalist intentionally sings a harmony, adds a soulful blues inflection, or ornaments a phrase, standard 1:1 note matchers score the take as failing.
 
-Tiki Rehearsal Lounge introduces the **Auditory Appeal Metric** ($0 - 100$), displayed directly opposite the Take Score on the Performance Report Card.
+Tiki Rehearsal Lounge introduces the **Auditory Appeal Metric** ($0 - 100$) in [audio/vocal_analyzer.py](audio/vocal_analyzer.py), displayed directly opposite the Take Score on the Performance Report Card.
 
 ```mermaid
 flowchart LR
@@ -431,7 +431,7 @@ Rewards natural vibrato bloom (onset delay of 200–500 ms after note attack) an
 
 ## 8. Multi-Tier Ground-Truth Lyric Synchronization & Bundled Whisper STT
 
-Accurate lyrical evaluation requires timestamped ground truth. Tiki Rehearsal Lounge implements an automatic multi-tier fallback architecture:
+Accurate lyrical evaluation requires timestamped ground truth. [`LyricManager`](audio/lyric_manager.py) ([audio/lyric_manager.py](audio/lyric_manager.py)) implements an automatic 4-tier fallback and alignment architecture (`LyricAlignmentReport`):
 
 ```mermaid
 flowchart TD
@@ -446,13 +446,13 @@ flowchart TD
 ```
 
 ### Automatic Background STT
-When neither local nor online lyrics exist, the application launches a background worker (`audio/stt_engine.py`) using bundled offline `whisper.cpp` binaries (`whisper-cli` or `whisper-server`). The worker runs without freezing the UI or delaying rehearsal playback. Once generated, lyrics are indexed in `lyrics_cache.db` so transcription only runs once per song.
+When neither local nor online lyrics exist, the application launches a background worker ([audio/stt_engine.py](audio/stt_engine.py) — `transcribe_audio_offline()`, `find_whisper_binary()`) using bundled offline `whisper.cpp` binaries (`whisper-cli` or `whisper-server`). The worker runs without freezing the UI or delaying rehearsal playback. Once generated, lyrics are indexed in `lyrics_cache.db` so transcription only runs once per song.
 
 ---
 
 ## 9. 100% Offline AI Vocal Coach & Agent Workflow
 
-The vocal coach subsystem (`ai/offline_coach.py`) combines deterministic pedagogical analysis with local open-weights Large Language Model (LLM) inference.
+The vocal coach subsystem ([ai/offline_coach.py](ai/offline_coach.py) — `OfflineVocalCoach`) combines deterministic pedagogical telemetry, structured partition retrieval, and an agentic diagnostic planner with local open-weights Large Language Model (LLM) inference.
 
 ```mermaid
 sequenceDiagram
@@ -480,17 +480,20 @@ sequenceDiagram
     Coach-->>GUI: Append Coach Response to Chat Log
 ```
 
-### Local Loopback Inference Architecture
-* **Binary Bundle**: Standalone `llama-server` binary bundled directly inside the AppImage and Windows release packages.
-* **Ephemeral Port Assignment**: Dynamically discovers open loopback ports (`127.0.0.1:49152+`) to prevent port collisions.
-* **Context Budgeting**: Context window configured to **4,096 tokens** (`--ctx-size 4096`), with prompts budgeted strictly below 1,500 tokens to guarantee fast token throughput and zero context-overflow errors.
-* **Deterministic Fallback Engine**: If the local LLM is uninstalled or downloading, `_generate_rule_based_chat_reply()` analyzes the take's intonation, lyrics, and Auditory Appeal to answer questions accurately without hallucinations.
+### Multi-Stage Agentic Orchestration & Telemetry Grounding ([`OfflineVocalCoach`](ai/offline_coach.py))
+1. **Partition & Historical Context Retrieval (`_build_debrief_prompt`, `_build_chat_prompt`)**: Queries structured acoustic partitions from [storage/take_partitions.py](storage/take_partitions.py) (`acoustic_core.json`, `phrase_timeline.json`, `lyrics_alignment.json`) alongside longitudinal take-over-take progression trends from [`ProgressionDatabase.build_llm_progression_context()`](db/progression_db.py).
+2. **Diagnostic Warmup & Exercise Planner (`generate_warmup_routine`, `_build_warmup_prompt`, `_parse_warmup_json`)**: Acts as an autonomous pedagogical planner that inspects the vocalist's measured faults (e.g., flat intonation drift in upper passaggi, delayed onset attacks, or constricted formant ratio) and synthesizes a structured JSON warmup plan (`_parse_warmup_json`) mapped to procedural synthesizer routines (`arpeggio`, `siren`, `pentatonic`, `lip_trill`) with schema validation and automatic deterministic fallback (`_generate_rule_based_warmup`).
+3. **Creative Harmonic Adaptation Evaluator (`generate_creative_adaptation_notes`)**: Evaluates intentional stylistic departures where `auditory_appeal_score` exceeds raw 1:1 melody matching, distinguishing deliberate jazz/blues consonance from pitch errors.
+4. **Local Loopback Inference & Deterministic Fallback Gate**:
+   * **Binary Bundle**: Standalone `llama-server` binary bundled directly inside the AppImage and Windows release packages, bound to an ephemeral loopback port (`127.0.0.1:49152+`) with GPU acceleration auto-detection (`get_acceleration_mode()`).
+   * **Context Budgeting**: Context window configured to **4,096 tokens** (`--ctx-size 4096`), with prompts budgeted strictly below 1,500 tokens to guarantee fast token throughput and zero context-overflow errors.
+   * **Deterministic Rule-Based Fallback Gate (`_generate_rule_based_debrief`, `_generate_rule_based_chat_reply`)**: If the local LLM is offline or output fails validation, the deterministic telemetry analyzer inspects exact cents drift, WER, and Auditory Appeal metrics to guarantee zero-hallucination coaching responses.
 
 ---
 
 ## 10. Rolling Progression Database
 
-Performance metrics are saved to `rehearsal_history.db` (`STUDIO_CONFIG_DIR / "data" / "rehearsal_history.db"`), completely segregated from the song catalog:
+Performance metrics are persisted by [db/progression_db.py](db/progression_db.py) (`ProgressionDatabase`, `record_take()`, `get_song_history()`, `get_lifetime_stats()`) to `rehearsal_history.db` (`STUDIO_CONFIG_DIR / "data" / "rehearsal_history.db"`), completely segregated from the song catalog ([db/bridge.py](db/bridge.py)):
 
 * **Automatic Rolling Window**: Automatically prunes records to enforce a maximum of **15 takes per song** and **100 takes studio-wide**, keeping prompt token overhead under 200 tokens.
 * **Delta Tracking**: Calculates take-over-take variance in overall score, pitch accuracy %, intonation cents drift, and diaphragmatic breath support.
@@ -500,7 +503,7 @@ Performance metrics are saved to `rehearsal_history.db` (`STUDIO_CONFIG_DIR / "d
 
 ## 11. Multi-Instrument Procedural Tone Synthesizer
 
-All warmup reference tones are procedurally generated in pure Python (`audio/tone_generator.py`) using harmonic additive synthesis:
+All warmup reference tones are procedurally generated in pure Python ([audio/tone_generator.py](audio/tone_generator.py)) using harmonic additive synthesis:
 
 $$s(t) = \sum_{k=1}^{N} A_k \cdot \sin(2\pi \cdot k \cdot f \cdot t) \cdot e^{-\alpha_k t}$$
 
