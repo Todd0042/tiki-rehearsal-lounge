@@ -118,6 +118,74 @@ class TestVocalTakeAnalyzer(unittest.TestCase):
         self.assertEqual(delay_ms, 0.0)
         self.assertIn("Straight-Tone", bloom_verdict)
 
+    def test_melodic_contour_extraction(self):
+        import numpy as np
+        # Construct rising phrase: 440 Hz (A4) climbing steadily
+        t = np.linspace(0, 1.0, 50)
+        rising_pitches = 440.0 * (2.0 ** (t * 2.0 / 12.0))  # climbs 2 semitones
+        slopes, gestures, plateau_pct = self.analyzer._extract_melodic_contour(rising_pitches, hop_ms=20.0)
+        self.assertEqual(len(slopes), len(rising_pitches))
+        self.assertEqual(len(gestures), len(rising_pitches))
+        # Gestures during climb should be ascending (+1)
+        self.assertTrue(np.all(gestures[5:] == 1))
+        self.assertLess(plateau_pct, 50.0)
+
+        # Construct flat plateau
+        flat_pitches = np.ones(40) * 440.0
+        _, flat_gestures, flat_plateau_pct = self.analyzer._extract_melodic_contour(flat_pitches, hop_ms=20.0)
+        self.assertTrue(np.all(flat_gestures[1:] == 0))
+        self.assertEqual(flat_plateau_pct, 100.0)
+
+    def test_relative_interval_and_octave_matching(self):
+        import numpy as np
+        import tempfile
+        from pathlib import Path
+        import scipy.io.wavfile as wavfile
+
+        sr = 22050
+        duration = 1.0
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        ref_tone = (0.5 * np.sin(2 * np.pi * 440.0 * t) * 32767).astype(np.int16)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ref_path = Path(tmp_dir) / "ref_guide.wav"
+            wavfile.write(str(ref_path), sr, ref_tone)
+
+            # Singer sings at 220 Hz (A3, MIDI 57) - exact octave below 440 Hz (A4)
+            num_frames = 60
+            s_times = np.linspace(0, duration, num_frames)
+            s_pitches = np.ones(num_frames) * 220.0
+
+            acc_pct, intonation, rhythm_ms, r_pitches = self.analyzer._compare_with_reference(
+                s_times, s_pitches, ref_path, key_shift=0
+            )
+
+            # Octave invariance ensures octave difference is matched rather than penalized
+            self.assertGreaterEqual(acc_pct, 90.0)
+            self.assertAlmostEqual(intonation, 0.0, delta=2.0)
+
+    def test_genre_aware_auditory_appeal(self):
+        import numpy as np
+        sr = 22050
+        singer_audio = np.ones(sr) * 0.1
+        # Reference at 440 Hz (A4)
+        ref_pitches = np.ones(60) * 440.0
+        # Singer sings minor 7th (G4, ~392 Hz, 10 semitones away = flat 7th)
+        # In standard Pop, flat 7th is moderate (0.84), in Blues it is rewarded as iconic blue note (0.96)
+        g4_hz = 440.0 * (2.0 ** (-2.0 / 12.0))
+        singer_pitches = np.ones(60) * g4_hz
+
+        pop_score, _, pop_cons, _, _ = self.analyzer._analyze_auditory_appeal(
+            singer_audio, sr, singer_pitches, ref_pitches, genre="pop"
+        )
+        blues_score, _, blues_cons, _, _ = self.analyzer._analyze_auditory_appeal(
+            singer_audio, sr, singer_pitches, ref_pitches, genre="blues"
+        )
+
+        self.assertGreaterEqual(blues_cons, pop_cons)
+        self.assertGreaterEqual(blues_score, pop_score)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -50,7 +50,11 @@ from config import (
     load_studio_config,
     STUDIO_CONFIG,
     STORAGE_MODE,
-    find_tiki_karaoke_config_path
+    find_tiki_karaoke_config_path,
+    UI_COMPACT_SIZE,
+    AI_PANEL_WIDTH,
+    set_ai_panel_preference,
+    resolve_ai_panel_active
 )
 from db.bridge import TikiDatabaseBridge
 from db.progression_db import ProgressionDatabase
@@ -67,7 +71,6 @@ from audio.parallel_analyzer import ParallelVocalTakeAnalyzer
 from audio.lyric_manager import LyricManager, LyricTrack, LyricAlignmentReport
 from storage.take_partitions import (
     save_take_partitions,
-    load_take_toc,
     get_most_recent_take_dir,
     load_take_report_and_lyrics
 )
@@ -82,7 +85,10 @@ from audio.tone_generator import (
     note_name_to_midi
 )
 from downloader import TrackDownloader, relocate_and_rename_track_file
-from ai.offline_coach import OfflineVocalCoach, AVAILABLE_MODELS
+from ai.offline_coach import OfflineVocalCoach
+
+# Smallest usable compact window (the AI dock adds AI_PANEL_WIDTH on top of this)
+COMPACT_MIN_SIZE = (980, 650)
 
 
 class StudioCockpitWindow:
@@ -92,8 +98,8 @@ class StudioCockpitWindow:
 
         self.root = tk.Tk()
         self.root.title(f"🌺 Tiki Rehearsal Lounge — Studio Cockpit v{STUDIO_VERSION}")
-        self.root.geometry("1020x820")
-        self.root.minsize(880, 680)
+        self.root.geometry(f"{UI_COMPACT_SIZE[0]}x{UI_COMPACT_SIZE[1]}")
+        self.root.minsize(*COMPACT_MIN_SIZE)
         self.root.configure(bg=COLOR_BG_MAIN)
 
         # Set application icon
@@ -123,15 +129,17 @@ class StudioCockpitWindow:
         self.player = RehearsalPlayer(on_finished=self._on_playback_ended)
         self.downloader = TrackDownloader(db_bridge=self.db)
 
-        # Offline AI Vocal Coach Engine
+        # Offline AI engine handle (cheap: no process/model is started until the AI panel asks)
         self.offline_coach = OfflineVocalCoach()
-        self.chat_history: List[Dict[str, str]] = []
         self._last_take_report: Optional[TakeAnalysisReport] = None
-        self._is_ai_generating: bool = False
-        self._selected_model_key: str = "3b"
-        self._is_downloading_model: bool = False
-        self._download_cancel_event: Optional[threading.Event] = None
         self._drawer_expanded: bool = False
+
+        # Optional AI side panel host state (the panel itself is built lazily on first show)
+        self.ai_panel = None
+        self._ai_panel_visible: bool = False
+        self._ai_animating: bool = False
+        self._ai_reapply: bool = False
+        self._ai_window_growth: int = 0
 
         # Library Filter & Search State
         self._library_filter: str = "ready"
@@ -171,6 +179,7 @@ class StudioCockpitWindow:
         # Build UI
         self._setup_styles()
         self._build_header()
+        self._build_body()
         self._build_main_notebook()
         self._build_footer()
 
@@ -183,6 +192,9 @@ class StudioCockpitWindow:
 
         # Automatically reload and display the most recent rehearsal take on startup
         self.root.after(80, self._load_most_recent_take_on_startup)
+
+        # Dock the optional AI side panel only if configured / a model is installed
+        self.root.after(220, self._apply_ai_panel_state)
 
     def dispatch_to_main(self, fn: Callable[[], None]):
         """Thread-safe dispatcher for executing UI updates on the Tkinter main thread."""
@@ -335,10 +347,10 @@ class StudioCockpitWindow:
         )
         self.btn_settings.pack(side="right", padx=(8, 0), pady=(2, 0))
 
-        # Persistent AI Coach Manager & Uninstaller Button
+        # Optional AI Studio side-panel toggle (persisted in config.json -> ai_panel_enabled)
         self.btn_header_ai = tk.Button(
             title_row,
-            text="🤖 AI Coach: Manage / Uninstall",
+            text="🤖 AI Studio: OFF  ◂ Show",
             font=("Helvetica", 9, "bold"),
             bg="#301542",
             fg=COLOR_GOLD,
@@ -349,7 +361,7 @@ class StudioCockpitWindow:
             padx=10,
             pady=3,
             cursor="hand2",
-            command=self._open_manage_models_dialog
+            command=self._on_toggle_ai_panel
         )
         self.btn_header_ai.pack(side="right", padx=(8, 0), pady=(2, 0))
 
@@ -374,8 +386,23 @@ class StudioCockpitWindow:
         )
         sub_lbl.pack(anchor="w", pady=(2, 0))
 
+    def _build_body(self):
+        """
+        Body = [ main_area (always) ][ ai_dock (only while the AI panel is active) ].
+        The dock is a fixed-width frame that is never packed in compact mode, so non-AI users
+        carry zero extra widgets, layout cost or AI-module imports.
+        """
+        self.body_frame = tk.Frame(self.root, bg=COLOR_BG_MAIN)
+        self.body_frame.pack(fill="both", expand=True)
+
+        self.main_area = tk.Frame(self.body_frame, bg=COLOR_BG_MAIN)
+        self.main_area.pack(side="left", fill="both", expand=True)
+
+        self.ai_dock = tk.Frame(self.body_frame, bg=COLOR_BG_MAIN, width=AI_PANEL_WIDTH)
+        self.ai_dock.pack_propagate(False)  # keep exact width regardless of panel content
+
     def _build_main_notebook(self):
-        self.notebook = ttk.Notebook(self.root)
+        self.notebook = ttk.Notebook(self.main_area)
         self.notebook.pack(fill="both", expand=True, padx=24, pady=8)
 
         # Tab 1: Rehearsal Studio (Primary)
@@ -474,16 +501,6 @@ class StudioCockpitWindow:
         )
         btn_key_down.pack(side="left")
 
-        self.lbl_key_val = tk.Label(
-            key_ctrl_row,
-            text="Original Key (0)",
-            font=("Helvetica", 12, "bold"),
-            fg=COLOR_GOLD,
-            bg=COLOR_BG_CARD,
-            width=16
-        )
-        self.lbl_key_val.pack(side="left", padx=8)
-
         btn_key_up = tk.Button(
             key_ctrl_row,
             text="+1 ▶",
@@ -495,7 +512,16 @@ class StudioCockpitWindow:
             pady=6,
             command=self._on_key_up
         )
-        btn_key_up.pack(side="left")
+        btn_key_up.pack(side="right")
+
+        self.lbl_key_val = tk.Label(
+            key_ctrl_row,
+            text="Original Key (0)",
+            font=("Helvetica", 11, "bold"),
+            fg=COLOR_GOLD,
+            bg=COLOR_BG_CARD
+        )
+        self.lbl_key_val.pack(side="left", fill="x", expand=True, padx=4)
 
         self.btn_auto_key = tk.Button(
             key_card,
@@ -644,7 +670,7 @@ class StudioCockpitWindow:
 
         self.report_frame = tk.LabelFrame(
             right_panel,
-            text=" PERFORMANCE REPORT CARD ",
+            text=" PERFORMANCE REPORT CARD — RAW ANALYSIS ",
             bg=COLOR_BG_CARD,
             fg=COLOR_CYAN,
             font=("Helvetica", 11, "bold"),
@@ -689,12 +715,18 @@ class StudioCockpitWindow:
         self.report_canvas.pack(side="left", fill="both", expand=True)
         self.report_scrollbar.pack(side="right", fill="y")
 
-        # Score Banner
+        # Score Banner (2-column balanced grid)
         self.score_banner = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
         self.score_banner.pack(fill="x", pady=(0, 16))
+        self.score_banner.columnconfigure(0, weight=1, uniform="banner_col")
+        self.score_banner.columnconfigure(1, weight=1, uniform="banner_col")
+
+        # Column 0: Take Score (Objective DSP)
+        card_score = tk.Frame(self.score_banner, bg=COLOR_BG_CARD)
+        card_score.grid(row=0, column=0, sticky="w")
 
         self.lbl_score_num = tk.Label(
-            self.score_banner,
+            card_score,
             text="--",
             font=("Helvetica", 36, "bold"),
             fg=COLOR_CYAN,
@@ -702,13 +734,13 @@ class StudioCockpitWindow:
         )
         self.lbl_score_num.pack(side="left")
 
-        score_txt_frame = tk.Frame(self.score_banner, bg=COLOR_BG_CARD)
-        score_txt_frame.pack(side="left", padx=14)
+        score_txt_frame = tk.Frame(card_score, bg=COLOR_BG_CARD)
+        score_txt_frame.pack(side="left", padx=(10, 0))
 
         self.lbl_score_title = tk.Label(
             score_txt_frame,
             text="Take Score",
-            font=("Helvetica", 14, "bold"),
+            font=("Helvetica", 13, "bold"),
             fg=COLOR_TEXT_MAIN,
             bg=COLOR_BG_CARD
         )
@@ -716,19 +748,21 @@ class StudioCockpitWindow:
 
         self.lbl_score_sub = tk.Label(
             score_txt_frame,
-            text="Sing a take to generate performance metrics",
-            font=("Helvetica", 9),
+            text="Objective DSP acoustics",
+            font=("Helvetica", 8),
             fg=COLOR_TEXT_MUTED,
-            bg=COLOR_BG_CARD
+            bg=COLOR_BG_CARD,
+            wraplength=175,
+            justify="left"
         )
         self.lbl_score_sub.pack(anchor="w")
 
-        # Auditory Pleasingness / Artistic Appeal Banner (Top-right across from Take Score)
-        auditory_banner_frame = tk.Frame(self.score_banner, bg=COLOR_BG_CARD)
-        auditory_banner_frame.pack(side="right")
+        # Column 1: Auditory Appeal (Top-right across from Take Score)
+        card_auditory = tk.Frame(self.score_banner, bg=COLOR_BG_CARD)
+        card_auditory.grid(row=0, column=1, sticky="e")
 
         self.lbl_auditory_num = tk.Label(
-            auditory_banner_frame,
+            card_auditory,
             text="--",
             font=("Helvetica", 36, "bold"),
             fg=COLOR_GOLD,
@@ -736,13 +770,13 @@ class StudioCockpitWindow:
         )
         self.lbl_auditory_num.pack(side="right")
 
-        auditory_txt_frame = tk.Frame(auditory_banner_frame, bg=COLOR_BG_CARD)
-        auditory_txt_frame.pack(side="right", padx=14)
+        auditory_txt_frame = tk.Frame(card_auditory, bg=COLOR_BG_CARD)
+        auditory_txt_frame.pack(side="right", padx=(0, 10))
 
         self.lbl_auditory_title = tk.Label(
             auditory_txt_frame,
             text="Auditory Appeal",
-            font=("Helvetica", 14, "bold"),
+            font=("Helvetica", 13, "bold"),
             fg=COLOR_TEXT_MAIN,
             bg=COLOR_BG_CARD
         )
@@ -750,10 +784,12 @@ class StudioCockpitWindow:
 
         self.lbl_auditory_sub = tk.Label(
             auditory_txt_frame,
-            text="Harmonic musicality & listener appeal",
-            font=("Helvetica", 9),
+            text="Harmonic musicality & styling",
+            font=("Helvetica", 8),
             fg=COLOR_TEXT_MUTED,
-            bg=COLOR_BG_CARD
+            bg=COLOR_BG_CARD,
+            wraplength=175,
+            justify="right"
         )
         self.lbl_auditory_sub.pack(anchor="e")
 
@@ -843,10 +879,16 @@ class StudioCockpitWindow:
         self.lbl_drawer_bloom = tk.Label(row_bloom, text="-- (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
         self.lbl_drawer_bloom.pack(side="left", padx=8)
 
+        row_shape = tk.Frame(self.drawer_subcards, bg="#130a1c")
+        row_shape.pack(fill="x", pady=2)
+        tk.Label(row_shape, text="📈 Melodic Contour & Phrase Shape:", font=("Helvetica", 8, "bold"), fg=COLOR_LIME, bg="#130a1c").pack(side="left")
+        self.lbl_drawer_shape = tk.Label(row_shape, text="-- (Standby)", font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#130a1c")
+        self.lbl_drawer_shape.pack(side="left", padx=8)
+
         # Coach Notes
         self.notes_frame = tk.LabelFrame(
             scroll_content,
-            text=" COACH FEEDBACK ",
+            text=" ANALYSIS NOTES (RULE-BASED) ",
             bg="#140b20",
             fg=COLOR_GOLD,
             font=("Helvetica", 9, "bold"),
@@ -861,7 +903,7 @@ class StudioCockpitWindow:
 
         self.lbl_coach_empty = tk.Label(
             self.coach_feedback_container,
-            text="Complete a rehearsal take to view detailed coaching feedback.",
+            text="Complete a rehearsal take to view the raw analysis notes.",
             font=("Helvetica", 10),
             fg=COLOR_TEXT_MUTED,
             bg="#140b20",
@@ -870,328 +912,14 @@ class StudioCockpitWindow:
         )
         self.lbl_coach_empty.pack(fill="x", padx=4, pady=6)
 
-        # ---------------------------------------------------------
-        # AI COACH CONTAINER (Installer, Debrief, and Conversation)
-        # ---------------------------------------------------------
-        self.ai_container = tk.Frame(scroll_content, bg=COLOR_BG_CARD)
-        self.ai_container.pack(fill="x", pady=(0, 16))
-
-        # A. Optional Installer Card (Shown if model not installed)
-        self.ai_install_card = tk.LabelFrame(
-            self.ai_container,
-            text=" 🤖 OFFLINE AI VOCAL COACH (OPTIONAL MODULE) ",
-            bg="#1d0f2b",
-            fg=COLOR_CYAN,
-            font=("Helvetica", 9, "bold"),
-            bd=1,
-            padx=12,
-            pady=10
-        )
-
-        tk.Label(
-            self.ai_install_card,
-            text="Enable in-depth multi-paragraph vocal diagnostics and interactive conversation.\n"
-                 "100% offline • Zero accounts • Zero API keys • Completely private.",
-            font=("Helvetica", 9),
-            fg=COLOR_TEXT_MAIN,
-            bg="#1d0f2b",
-            justify="left"
-        ).pack(anchor="w", pady=(0, 8))
-
-        self.model_choice_var = tk.StringVar(value="7b")
-        opt_frame = tk.Frame(self.ai_install_card, bg="#1d0f2b")
-        opt_frame.pack(fill="x", pady=(0, 8))
-
-        rb0 = tk.Radiobutton(
-            opt_frame,
-            text="Qwen 2.5 7B-Instruct (~4.68 GB) — Master-Class Studio Director (6GB+ GPU / 8-Core CPU)",
-            variable=self.model_choice_var,
-            value="7b",
-            fg=COLOR_LIME,
-            bg="#1d0f2b",
-            selectcolor="#0d0814",
-            activebackground="#1d0f2b",
-            activeforeground=COLOR_LIME,
-            font=("Helvetica", 9, "bold")
-        )
-        rb0.pack(anchor="w")
-
-        rb1 = tk.Radiobutton(
-            opt_frame,
-            text="Qwen 2.5 3B-Instruct (~1.95 GB) — Deep Pedagogy (Recommended for mid-range GPUs/CPUs)",
-            variable=self.model_choice_var,
-            value="3b",
-            fg=COLOR_GOLD,
-            bg="#1d0f2b",
-            selectcolor="#0d0814",
-            activebackground="#1d0f2b",
-            activeforeground=COLOR_GOLD,
-            font=("Helvetica", 9, "bold")
-        )
-        rb1.pack(anchor="w")
-
-        rb2 = tk.Radiobutton(
-            opt_frame,
-            text="Qwen 2.5 1.5B-Instruct (~986 MB) — Ultra-Fast & Compact (Sub-1 GB, fast on light CPUs)",
-            variable=self.model_choice_var,
-            value="1.5b",
-            fg=COLOR_CYAN,
-            bg="#1d0f2b",
-            selectcolor="#0d0814",
-            activebackground="#1d0f2b",
-            activeforeground=COLOR_CYAN,
-            font=("Helvetica", 9)
-        )
-        rb2.pack(anchor="w")
-
-        accel_frame = tk.Frame(self.ai_install_card, bg="#1d0f2b")
-        accel_frame.pack(fill="x", pady=(0, 10))
-
-        tk.Label(
-            accel_frame,
-            text="Inference Acceleration:",
-            font=("Helvetica", 9, "bold"),
-            fg=COLOR_GOLD,
-            bg="#1d0f2b"
-        ).pack(side="left", padx=(0, 10))
-
-        self.accel_choice_var = tk.StringVar(value=self.offline_coach.get_acceleration_mode())
-
-        rb_gpu = tk.Radiobutton(
-            accel_frame,
-            text="⚡ GPU (VRAM Offload - Recommended for Dedicated GPUs)",
-            variable=self.accel_choice_var,
-            value="gpu",
-            fg=COLOR_CYAN,
-            bg="#1d0f2b",
-            selectcolor="#0d0814",
-            activebackground="#1d0f2b",
-            activeforeground=COLOR_CYAN,
-            font=("Helvetica", 8, "bold"),
-            command=lambda: self.offline_coach.set_acceleration_mode(self.accel_choice_var.get())
-        )
-        rb_gpu.pack(side="left", padx=(0, 12))
-
-        rb_cpu = tk.Radiobutton(
-            accel_frame,
-            text="🖥️ CPU Only (Universal Compatibility)",
-            variable=self.accel_choice_var,
-            value="cpu",
-            fg=COLOR_TEXT_MAIN,
-            bg="#1d0f2b",
-            selectcolor="#0d0814",
-            activebackground="#1d0f2b",
-            activeforeground=COLOR_TEXT_MAIN,
-            font=("Helvetica", 8),
-            command=lambda: self.offline_coach.set_acceleration_mode(self.accel_choice_var.get())
-        )
-        rb_cpu.pack(side="left")
-
-        btn_row = tk.Frame(self.ai_install_card, bg="#1d0f2b")
-        btn_row.pack(fill="x")
-
-        self.btn_install_ai = tk.Button(
-            btn_row,
-            text="📥 Download & Install Offline AI Coach",
-            bg="#3a1859",
-            fg=COLOR_CYAN,
-            font=("Helvetica", 9, "bold"),
-            bd=1,
-            padx=12,
-            pady=6,
-            command=self._on_download_ai_model
-        )
-        self.btn_install_ai.pack(side="left")
-
-        self.lbl_ai_install_status = tk.Label(
-            btn_row,
-            text="Ready to install",
-            font=("Helvetica", 8),
-            fg=COLOR_TEXT_MUTED,
-            bg="#1d0f2b"
-        )
-        self.lbl_ai_install_status.pack(side="left", padx=10)
-
-        self.prog_ai = ttk.Progressbar(self.ai_install_card, orient="horizontal", mode="determinate")
-
-        # B. Automatic AI Debriefing Card (Shown if model installed)
-        self.ai_debrief_card = tk.LabelFrame(
-            self.ai_container,
-            text=" 🤖 AI VOCAL COACH IN-DEPTH DEBRIEF ",
-            bg="#1c0e2c",
-            fg=COLOR_GOLD,
-            font=("Helvetica", 9, "bold"),
-            bd=1,
-            padx=12,
-            pady=10
-        )
-
-        debrief_header = tk.Frame(self.ai_debrief_card, bg="#1c0e2c")
-        debrief_header.pack(fill="x", pady=(0, 6))
-
-        self.lbl_ai_model_badge = tk.Label(
-            debrief_header,
-            text="⚡ Model: Offline CPU",
-            font=("Helvetica", 8, "italic"),
-            fg=COLOR_CYAN,
-            bg="#1c0e2c"
-        )
-        self.lbl_ai_model_badge.pack(side="left")
-
-        btn_manage_ai = tk.Button(
-            debrief_header,
-            text="🗑️ Uninstall / Manage AI Model",
-            font=("Helvetica", 8, "bold"),
-            bg="#3b1548",
-            fg=COLOR_GOLD,
-            activebackground="#5a2070",
-            activeforeground="#ffffff",
-            bd=1,
-            relief="solid",
-            padx=10,
-            pady=3,
-            command=self._open_manage_models_dialog
-        )
-        btn_manage_ai.pack(side="right")
-
-        self.lbl_ai_debrief_text = tk.Label(
-            self.ai_debrief_card,
-            text="Take debriefing will appear here once take analysis completes.",
-            font=("Helvetica", 9),
-            fg=COLOR_TEXT_MAIN,
-            bg="#1c0e2c",
-            anchor="w",
-            justify="left",
-            wraplength=420
-        )
-        self.lbl_ai_debrief_text.pack(fill="x")
-
-        # C. Interactive Performance Conversation Card
-        self.conversation_card = tk.LabelFrame(
-            self.ai_container,
-            text=" 💬 CONVERSATION WITH COACH ",
-            bg="#150a22",
-            fg=COLOR_CYAN,
-            font=("Helvetica", 9, "bold"),
-            bd=1,
-            padx=12,
-            pady=10
-        )
-
-        # Quick Action Pills
-        pills_row = tk.Frame(self.conversation_card, bg="#150a22")
-        pills_row.pack(fill="x", pady=(0, 6))
-
-        btn_p1 = tk.Button(
-            pills_row,
-            text="🎯 Fix Pitch Droop",
-            font=("Helvetica", 7, "bold"),
-            bg="#2a143f",
-            fg=COLOR_TEXT_MAIN,
-            bd=0,
-            padx=6,
-            pady=3,
-            command=lambda: self._send_coach_prompt("How can I fix pitch droop at the ends of my phrases?")
-        )
-        btn_p1.pack(side="left", padx=(0, 4))
-
-        btn_p2 = tk.Button(
-            pills_row,
-            text="⏱️ Timing & Rhythm",
-            font=("Helvetica", 7, "bold"),
-            bg="#2a143f",
-            fg=COLOR_CYAN,
-            bd=0,
-            padx=6,
-            pady=3,
-            command=lambda: self._send_coach_prompt("How was my line onset timing and rhythm? Did I start any sentences late or drag?")
-        )
-        btn_p2.pack(side="left", padx=4)
-
-        btn_p3 = tk.Button(
-            pills_row,
-            text="🎹 Key Shift Advice",
-            font=("Helvetica", 7, "bold"),
-            bg="#2a143f",
-            fg=COLOR_GOLD,
-            bd=0,
-            padx=6,
-            pady=3,
-            command=lambda: self._send_coach_prompt("Would changing the key shift make this song fit my voice better?")
-        )
-        btn_p3.pack(side="left", padx=4)
-
-        btn_p4 = tk.Button(
-            pills_row,
-            text="✨ Resonance Ring",
-            font=("Helvetica", 7, "bold"),
-            bg="#2a143f",
-            fg=COLOR_LIME,
-            bd=0,
-            padx=6,
-            pady=3,
-            command=lambda: self._send_coach_prompt("How can I get more singer's formant ring without throat strain?")
-        )
-        btn_p4.pack(side="left", padx=4)
-
-        # Chat Transcript Frame
-        self.chat_transcript_container = tk.Frame(self.conversation_card, bg="#0d0615", bd=1, relief="solid", padx=8, pady=6)
-        self.chat_transcript_container.pack(fill="both", expand=True, pady=(2, 8))
-
-        self.lbl_chat_intro = tk.Label(
-            self.chat_transcript_container,
-            text="Ask Maestro Tiki anything about your take, breath technique, or key adjustments:",
-            font=("Helvetica", 8, "italic"),
-            fg=COLOR_TEXT_MUTED,
-            bg="#0d0615"
-        )
-        self.lbl_chat_intro.pack(anchor="w")
-
-        # Chat Input Row
-        chat_input_row = tk.Frame(self.conversation_card, bg="#150a22")
-        chat_input_row.pack(fill="x")
-
-        self.ent_chat_input = tk.Entry(
-            chat_input_row,
-            font=("Helvetica", 9),
-            bg="#0d0814",
-            fg=COLOR_TEXT_MAIN,
-            insertbackground=COLOR_CYAN,
-            bd=1,
-            relief="solid"
-        )
-        self.ent_chat_input.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self.ent_chat_input.bind("<Return>", lambda e: self._on_submit_chat())
-
-        self.btn_send_chat = tk.Button(
-            chat_input_row,
-            text="Send ➔",
-            font=("Helvetica", 8, "bold"),
-            bg=COLOR_CYAN,
-            fg="#000000",
-            bd=0,
-            padx=10,
-            pady=4,
-            command=self._on_submit_chat
-        )
-        self.btn_send_chat.pack(side="right")
-
-        self._refresh_ai_coach_view()
-
         def _on_resize_notes(event):
             wrap = max(260, event.width - 60)
             if hasattr(self, "lbl_coach_empty") and self.lbl_coach_empty.winfo_exists():
                 self.lbl_coach_empty.config(wraplength=wrap)
-            if hasattr(self, "lbl_ai_debrief_text") and self.lbl_ai_debrief_text.winfo_exists():
-                self.lbl_ai_debrief_text.config(wraplength=wrap)
             for widget in self.coach_feedback_container.winfo_children():
                 for sub in widget.winfo_children():
                     if isinstance(sub, tk.Label) and sub.cget("text") != "✦":
                         sub.config(wraplength=wrap)
-            if hasattr(self, "chat_transcript_container"):
-                for w in self.chat_transcript_container.winfo_children():
-                    if isinstance(w, tk.Label):
-                        w.config(wraplength=wrap)
         self.notes_frame.bind("<Configure>", _on_resize_notes)
 
     def _create_metric_tile(self, parent: tk.Frame, title: str, val: str, sub: str) -> tk.Frame:
@@ -2375,23 +2103,43 @@ class StudioCockpitWindow:
             if sa_meta and sa_meta.get("local_path"):
                 ref_path = Path(sa_meta["local_path"])
 
+        track_genre = (self.selected_track.get("genre") if self.selected_track else "pop") or "pop"
         report, lyric_alignment = self.parallel_analyzer.analyze_take_parallel(
             singer_wav=take_wav,
             reference_wav=ref_path,
             playback_audio_path=playback_path,
             key_shift=self.current_key_shift,
+            genre=track_genre,
             lyric_track=self._current_lyric_track,
             progress_cb=_prog_cb
         )
 
         self._last_lyric_alignment = lyric_alignment
+
+        # Snapshot progression context BEFORE recording this take, so deltas compare to prior takes.
+        progression = None
+        try:
+            progression = self.progression_db.build_llm_progression_context(
+                track_title=(self.selected_track or {}).get("title", "Rehearsal Track"),
+                current_score=report.overall_score,
+                current_pitch_acc=report.pitch_accuracy_pct,
+                current_breath=report.breath_support_pct
+            )
+        except Exception as e:
+            print(f"[StudioWindow] Progression snapshot error: {e}", file=sys.stderr)
+
         take_dir = save_take_partitions(
             report=report,
             lyric_report=lyric_alignment,
             track_info=self.selected_track,
-            take_wav=take_wav
+            take_wav=take_wav,
+            vocal_profile=self.vocal_profile.to_dict() if self.vocal_profile else None,
+            progression=progression
         )
         self._last_take_dir = take_dir
+
+        # Core take-history bookkeeping happens here, independent of any AI feature.
+        self._record_take_progression(report)
 
         self.root.after_idle(lambda: self._display_report_card(report, lyric_alignment))
 
@@ -2433,6 +2181,10 @@ class StudioCockpitWindow:
         self.lbl_drawer_scoop.config(text=f"{report.pitch_scoop_pct:.0f}% ({report.attack_velocity_verdict})")
         self.lbl_drawer_arc.config(text=f"{report.dynamic_contrast_db:.1f} dB ({report.dynamic_arc_verdict})")
         self.lbl_drawer_bloom.config(text=f"{report.vibrato_style_verdict} ({report.vibrato_bloom_ms:.0f}ms delay)")
+        shape_pct = getattr(report, "contour_similarity_pct", 0.0)
+        shape_verdict = getattr(report, "phrase_shape_verdict", "Natural Phrasing Arcs")
+        if hasattr(self, "lbl_drawer_shape"):
+            self.lbl_drawer_shape.config(text=f"{shape_pct:.0f}% ({shape_verdict})")
 
         # Save last report and lyric alignment for conversational context
         self._last_take_report = report
@@ -2593,17 +2345,8 @@ class StudioCockpitWindow:
             )
             body_lbl.pack(fill="x", pady=(4, 0))
 
-        # 5. Automatically trigger or restore AI Take Debriefing
-        if is_reloaded_take and self._last_take_dir:
-            debrief_file = Path(self._last_take_dir) / "coach_debrief.txt"
-            if debbrief_text := (debrief_file.read_text(encoding="utf-8").strip() if debrief_file.is_file() else ""):
-                self._last_debrief_text = debbrief_text
-                self.lbl_ai_debrief_text.config(text=debbrief_text, fg=COLOR_TEXT_MAIN)
-                self._refresh_ai_coach_view()
-            else:
-                self._trigger_ai_take_debrief(report, record_progression=False)
-        else:
-            self._trigger_ai_take_debrief(report, record_progression=True)
+        # 5. One-way hand-off: the (optional) AI side panel reads the persisted partitions itself
+        self._notify_ai_panel_take(is_reloaded_take)
 
         self.root.update_idletasks()
         if hasattr(self, "report_canvas"):
@@ -2675,41 +2418,6 @@ class StudioCockpitWindow:
             self.drawer_subcards.pack_forget()
             self.btn_toggle_drawer.config(text="▶ Acoustic Timbre & Dynamics Breakdown (Click to Expand)")
             self._drawer_expanded = False
-
-        self.root.update_idletasks()
-        if hasattr(self, "report_canvas"):
-            self.report_canvas.configure(scrollregion=self.report_canvas.bbox("all"))
-
-    def _refresh_ai_coach_view(self):
-        installed = self.offline_coach.get_installed_model()
-        accel = self.offline_coach.get_acceleration_mode().upper()
-        accel_icon = "⚡" if accel == "GPU" else "🖥️"
-        if installed:
-            if hasattr(self, "lbl_ai_model_badge"):
-                self.lbl_ai_model_badge.config(text=f"{accel_icon} Model: {installed.get('name', 'Offline')} • {accel}")
-            self.ai_install_card.pack_forget()
-            self.ai_debrief_card.pack(fill="x", pady=(8, 0))
-            self.conversation_card.pack(fill="x", pady=(8, 0))
-        else:
-            self.ai_debrief_card.pack_forget()
-            self.conversation_card.pack_forget()
-            self.ai_install_card.pack(fill="x", pady=(8, 0))
-            if hasattr(self, "lbl_ai_install_status"):
-                self.lbl_ai_install_status.config(text="Ready to install")
-            if hasattr(self, "prog_ai") and self.prog_ai.winfo_exists():
-                self.prog_ai.pack_forget()
-
-        if hasattr(self, "btn_header_ai"):
-            if installed:
-                self.btn_header_ai.config(
-                    text=f"🤖 AI Coach ({installed.get('key', '').upper()} • {accel}) • Manage",
-                    fg=COLOR_GOLD
-                )
-            else:
-                self.btn_header_ai.config(
-                    text="🤖 AI Coach: Manage / Install",
-                    fg=COLOR_TEXT_MUTED
-                )
 
         self.root.update_idletasks()
         if hasattr(self, "report_canvas"):
@@ -2838,9 +2546,7 @@ class StudioCockpitWindow:
             def _on_accel_change():
                 mode = dlg_accel_var.get()
                 self.offline_coach.set_acceleration_mode(mode)
-                if hasattr(self, "accel_choice_var"):
-                    self.accel_choice_var.set(mode)
-                self._refresh_ai_coach_view()
+                self._on_ai_state_changed()
                 lbl_accel_status.config(
                     text=f"Active: {'⚡ GPU Acceleration (Layers offloaded: 99)' if mode == 'gpu' else '🖥️ CPU Only (Universal Threads)'}"
                 )
@@ -2895,7 +2601,7 @@ class StudioCockpitWindow:
                 )
                 if confirmed:
                     self.offline_coach.uninstall_model()
-                    self._refresh_ai_coach_view()
+                    self._on_ai_state_changed()
                     dlg.destroy()
                     messagebox.showinfo(
                         "Model Uninstalled",
@@ -2942,175 +2648,204 @@ class StudioCockpitWindow:
         )
         btn_close.pack(side="bottom", pady=10)
 
-    def _on_download_ai_model(self):
-        if self._is_downloading_model:
+    # -------------------------------------------------------------
+    # OPTIONAL AI SIDE PANEL HOST (Maestro Tiki AI Studio)
+    # -------------------------------------------------------------
+    # The studio core only knows three things about the AI panel: whether it is docked, how to
+    # animate the window for it, and how to hand it a finished take directory. Everything else
+    # (widgets, threads, LLM calls, chat state) lives in ui/ai_panel.py.
+    def _set_status_text(self, msg: str):
+        if hasattr(self, "lbl_status") and self.lbl_status.winfo_exists():
+            self.lbl_status.config(text=msg)
+
+    def _ai_panel_should_be_active(self) -> bool:
+        try:
+            return resolve_ai_panel_active(self.offline_coach.is_installed())
+        except Exception as e:
+            print(f"[StudioWindow] AI panel detection failed, staying compact: {e}", file=sys.stderr)
+            return False
+
+    def _update_ai_toggle_button(self):
+        if not hasattr(self, "btn_header_ai"):
+            return
+        if self._ai_panel_visible:
+            self.btn_header_ai.config(text="🤖 AI Studio: ON  ▸ Hide", fg=COLOR_GOLD)
+        else:
+            self.btn_header_ai.config(text="🤖 AI Studio: OFF  ◂ Show", fg=COLOR_TEXT_MUTED)
+
+    def _on_toggle_ai_panel(self):
+        """Header toggle: explicit user choice, persisted as `ai_panel_enabled` in config.json."""
+        self._set_ai_panel_enabled(not self._ai_panel_visible)
+
+    def _set_ai_panel_enabled(self, enabled: bool):
+        set_ai_panel_preference(bool(enabled))
+        self._apply_ai_panel_state()
+
+    def _on_ai_state_changed(self):
+        """Called when a model is installed / uninstalled / acceleration changed."""
+        self._apply_ai_panel_state()
+
+    def _apply_ai_panel_state(self, animate: bool = True):
+        """Idempotently reconciles the docked panel with config + installed-model state."""
+        if self._ai_animating:
+            self._ai_reapply = True
+            return
+        want = self._ai_panel_should_be_active()
+        if want and not self._ai_panel_visible:
+            self._show_ai_panel(animate)
+        elif not want and self._ai_panel_visible:
+            self._hide_ai_panel(animate)
+        elif want and self.ai_panel is not None:
+            self.ai_panel.refresh_state()
+        self._update_ai_toggle_button()
+
+    def _show_ai_panel(self, animate: bool = True):
+        from ui.ai_panel import AIStudioPanel  # lazy: compact mode never imports/builds AI UI
+
+        if self.ai_panel is None:
+            self.ai_panel = AIStudioPanel(
+                self.ai_dock,
+                coach=self.offline_coach,
+                dispatch=self.dispatch_to_main,
+                on_manage=self._open_manage_models_dialog,
+                on_close=lambda: self._set_ai_panel_enabled(False),
+                on_state_changed=self._on_ai_state_changed,
+                on_status=self._set_status_text,
+            )
+        self.ai_panel.pack(fill="both", expand=True)
+        self.ai_panel.resume()
+        self._ai_panel_visible = True
+        self._update_ai_toggle_button()
+
+        def _after_dock():
+            # Hand over the most recent finished take (one-way: partitions on disk only)
+            if self._last_take_dir and self.ai_panel and self.ai_panel.current_take_dir != Path(self._last_take_dir):
+                self.ai_panel.load_take(self._last_take_dir, is_reloaded=True)
+
+        self._animate_ai_dock(expanding=True, animate=animate, on_done=_after_dock)
+
+    def _hide_ai_panel(self, animate: bool = True):
+        self._ai_panel_visible = False
+        if self.ai_panel is not None:
+            self.ai_panel.suspend()  # drops in-flight results; no dangling UI updates
+        self._update_ai_toggle_button()
+
+        def _after_undock():
+            if self.ai_panel is not None:
+                self.ai_panel.pack_forget()
+            # Free the llama-server process off the UI thread (shutdown can block briefly)
+            threading.Thread(target=self.offline_coach.shutdown_engine, daemon=True, name="ai-engine-shutdown").start()
+
+        self._animate_ai_dock(expanding=False, animate=animate, on_done=_after_undock)
+
+    def _is_window_maximized(self) -> bool:
+        try:
+            if self.root.state() == "zoomed":
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(self.root.attributes("-zoomed"))
+        except Exception:
+            return False
+
+    def _animate_ai_dock(self, expanding: bool, animate: bool, on_done: Callable[[], None]):
+        """
+        Grows/shrinks the window by AI_PANEL_WIDTH while sliding the dock open/closed in lock-step,
+        so the cockpit itself never jumps or reflows. Falls back to an instant change when the window
+        is maximized or animation is disabled.
+        """
+        total = AI_PANEL_WIDTH
+        self.root.update_idletasks()
+        base_w = max(self.root.winfo_width(), COMPACT_MIN_SIZE[0])
+        height = max(self.root.winfo_height(), COMPACT_MIN_SIZE[1])
+        maximized = self._is_window_maximized()
+
+        if expanding:
+            screen_room = max(0, self.root.winfo_screenwidth() - 24 - base_w)
+            growth = 0 if maximized else min(total, screen_room)
+            self._ai_window_growth = growth
+            self.ai_dock.config(width=1 if animate else total)
+            self.ai_dock.pack(side="right", fill="y", padx=(0, 12), pady=(8, 8), before=self.main_area)
+            self.root.minsize(COMPACT_MIN_SIZE[0] + growth, COMPACT_MIN_SIZE[1])
+        else:
+            growth = 0 if maximized else self._ai_window_growth
+            self.root.minsize(*COMPACT_MIN_SIZE)
+
+        if not animate or maximized:
+            if not maximized:
+                new_w = base_w + growth if expanding else max(COMPACT_MIN_SIZE[0], base_w - growth)
+                self.root.geometry(f"{new_w}x{height}")
+            if not expanding:
+                self.ai_dock.pack_forget()
+            else:
+                self.ai_dock.config(width=total)
+            on_done()
             return
 
-        choice = self.model_choice_var.get()
-        meta = AVAILABLE_MODELS.get(choice, AVAILABLE_MODELS["3b"])
-        self._is_downloading_model = True
-        self.btn_install_ai.config(state="disabled", text="⏳ Downloading Model...")
-        self.prog_ai.pack(fill="x", pady=(8, 4))
-        self.prog_ai["value"] = 0
-        self.lbl_ai_install_status.config(text=f"Connecting to Hugging Face ({meta['size_str']})...")
+        steps, delay_ms = 9, 14
+        self._ai_animating = True
 
-        def _progress(pct, msg):
-            def _ui():
-                self.prog_ai["value"] = int(pct * 100)
-                self.lbl_ai_install_status.config(text=msg)
-            self.root.after_idle(_ui)
+        def _finish():
+            self._ai_animating = False
+            if not expanding:
+                self.ai_dock.pack_forget()
+            else:
+                self.ai_dock.config(width=total)
+            try:
+                on_done()
+            finally:
+                if self._ai_reapply:
+                    self._ai_reapply = False
+                    self._apply_ai_panel_state()
 
-        def _worker():
-            success = self.offline_coach.download_model(choice, progress_cb=_progress)
-            def _done():
-                self._is_downloading_model = False
-                self.btn_install_ai.config(state="normal", text="📥 Download & Install Offline AI Coach")
-                if success:
-                    messagebox.showinfo("Installation Complete", f"Offline AI Coach ({meta['name']}) installed successfully!\n\nAll AI coaching is now 100% offline.")
-                    self._refresh_ai_coach_view()
-                    if self._last_take_report:
-                        self._trigger_ai_take_debrief(self._last_take_report)
-                else:
-                    messagebox.showwarning("Download Notice", "Could not complete model download. Please check your internet connection and try again.")
-            self.root.after_idle(_done)
+        def _step(i: int):
+            if not self.root.winfo_exists():
+                return
+            frac = i / steps
+            frac = 1 - (1 - frac) ** 2  # ease-out
+            dock_w = int(total * frac) if expanding else int(total * (1 - frac))
+            win_delta = int(growth * frac)
+            self.ai_dock.config(width=max(1, dock_w))
+            new_w = base_w + win_delta if expanding else base_w - win_delta
+            self.root.geometry(f"{max(COMPACT_MIN_SIZE[0], new_w)}x{height}")
+            if i >= steps:
+                _finish()
+            else:
+                self.root.after(delay_ms, lambda: _step(i + 1))
 
-        threading.Thread(target=_worker, daemon=True).start()
+        _step(1)
 
-    def _trigger_ai_take_debrief(self, report: TakeAnalysisReport, record_progression: bool = True):
-        self._refresh_ai_coach_view()
-        if not self.offline_coach.is_installed():
+    def _notify_ai_panel_take(self, is_reloaded: bool):
+        """One-way hand-off: tells the (optional) AI panel that a take is fully persisted on disk."""
+        if self.ai_panel is None or not self._ai_panel_visible or not self._last_take_dir:
             return
+        try:
+            self.ai_panel.load_take(self._last_take_dir, is_reloaded=is_reloaded)
+        except Exception as e:
+            print(f"[StudioWindow] AI panel hand-off failed (core unaffected): {e}", file=sys.stderr)
 
-        # If pure silence or filtered bleed, deliver concise coach advice immediately
+    def _record_take_progression(self, report: TakeAnalysisReport):
+        """Core (non-AI) bookkeeping: every real take is recorded in the progression history DB."""
         if report.overall_score == 0:
-            msg = report.coach_feedback[0] if report.coach_feedback else "No vocal singing detected."
-            self.lbl_ai_debrief_text.config(text=f"✦ Maestro Tiki: {msg}", fg=COLOR_GOLD)
             return
-
-        self.lbl_ai_debrief_text.config(text="✦ Maestro Tiki is analyzing your take metrics offline...", fg=COLOR_CYAN)
-
-        def _worker():
-            try:
-                track_title = self.selected_track.get("title", "Rehearsal Track") if self.selected_track else "Rehearsal Track"
-                progression_data = self.progression_db.build_llm_progression_context(
-                    track_title=track_title,
-                    current_score=report.overall_score,
-                    current_pitch_acc=report.pitch_accuracy_pct,
-                    current_breath=report.breath_support_pct
-                )
-                profile_dict = self.vocal_profile.to_dict() if self.vocal_profile else None
-                lyric_dict = self._last_lyric_alignment.to_dict() if self._last_lyric_alignment else None
-                toc_dict = load_take_toc(self._last_take_dir) if self._last_take_dir else None
-                debrief = self.offline_coach.generate_take_debrief(
-                    report.to_dict(),
-                    self.selected_track,
-                    profile_dict,
-                    progression_data=progression_data,
-                    lyric_alignment=lyric_dict,
-                    toc=toc_dict
-                )
-                self._last_debrief_text = debrief
-
-                # Persist generated debrief into take partition folder for instant retrieval
-                if self._last_take_dir and Path(self._last_take_dir).is_dir():
-                    try:
-                        (Path(self._last_take_dir) / "coach_debrief.txt").write_text(debrief, encoding="utf-8")
-                    except Exception:
-                        pass
-
-                # Record take in progression database only if it's a new take
-                if record_progression:
-                    self.progression_db.record_take(
-                        track_title=track_title,
-                        overall_score=report.overall_score,
-                        pitch_accuracy_pct=report.pitch_accuracy_pct,
-                        intonation_cents=report.intonation_cents,
-                        rhythm_offset_ms=report.rhythm_offset_ms,
-                        breath_support_pct=report.breath_support_pct,
-                        singers_formant_ratio=report.singers_formant_ratio,
-                        balanced_onsets_pct=report.balanced_onsets_pct,
-                        track_id=self.selected_track.get("id", 0) if self.selected_track else 0,
-                        track_artist=self.selected_track.get("artist", "") if self.selected_track else "",
-                        key_shift=self.current_key_shift
-                    )
-            except Exception as e:
-                import traceback
-                print(f"[StudioWindow] AI debrief error: {e}", file=sys.stderr)
-                traceback.print_exc()
-                debrief = self.offline_coach._generate_rule_based_debrief(
-                    report.to_dict(),
-                    self.selected_track,
-                    self.vocal_profile.to_dict() if self.vocal_profile else None,
-                    lyric_alignment=self._last_lyric_alignment.to_dict() if self._last_lyric_alignment else None
-                )
-                self._last_debrief_text = debrief
-
-            def _update():
-                self.lbl_ai_debrief_text.config(text=debrief, fg=COLOR_TEXT_MAIN)
-            self.root.after_idle(_update)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _send_coach_prompt(self, msg: str):
-        self.ent_chat_input.delete(0, tk.END)
-        self.ent_chat_input.insert(0, msg)
-        self._on_submit_chat()
-
-    def _on_submit_chat(self):
-        msg = self.ent_chat_input.get().strip()
-        if not msg or self._is_ai_generating:
-            return
-
-        self.ent_chat_input.delete(0, tk.END)
-        self._is_ai_generating = True
-        self.btn_send_chat.config(state="disabled")
-
-        if hasattr(self, "lbl_chat_intro") and self.lbl_chat_intro.winfo_exists():
-            self.lbl_chat_intro.destroy()
-
-        user_row = tk.Frame(self.chat_transcript_container, bg="#0d0615")
-        user_row.pack(fill="x", pady=2, anchor="w")
-        tk.Label(user_row, text="👤 You:", font=("Helvetica", 8, "bold"), fg=COLOR_CYAN, bg="#0d0615").pack(side="left", anchor="nw")
-        tk.Label(user_row, text=msg, font=("Helvetica", 8), fg=COLOR_TEXT_MAIN, bg="#0d0615", wraplength=380, justify="left").pack(side="left", padx=4)
-
-        coach_row = tk.Frame(self.chat_transcript_container, bg="#0d0615")
-        coach_row.pack(fill="x", pady=2, anchor="w")
-        tk.Label(coach_row, text="🌺 Coach Tiki:", font=("Helvetica", 8, "bold"), fg=COLOR_GOLD, bg="#0d0615").pack(side="left", anchor="nw")
-        coach_lbl = tk.Label(coach_row, text="Thinking...", font=("Helvetica", 8, "italic"), fg=COLOR_TEXT_MUTED, bg="#0d0615", wraplength=380, justify="left")
-        coach_lbl.pack(side="left", padx=4)
-
-        self.chat_history.append({"role": "user", "content": msg})
-
-        def _worker():
-            try:
-                rep_dict = self._last_take_report.to_dict() if self._last_take_report else None
-                debrief_ctx = getattr(self, "_last_debrief_text", None)
-                lyric_dict = self._last_lyric_alignment.to_dict() if getattr(self, "_last_lyric_alignment", None) else None
-                toc_dict = load_take_toc(self._last_take_dir) if getattr(self, "_last_take_dir", None) else None
-                reply = self.offline_coach.chat_with_coach(
-                    msg,
-                    self.chat_history,
-                    rep_dict,
-                    self.selected_track,
-                    debrief_text=debrief_ctx,
-                    lyric_alignment=lyric_dict,
-                    toc=toc_dict
-                )
-            except Exception as e:
-                import traceback
-                print(f"[StudioWindow] Chat error: {e}", file=sys.stderr)
-                traceback.print_exc()
-                reply = "Coach Tiki: Keep focusing on forward resonance and relaxed, diaphragmatic breath support!"
-
-            self.chat_history.append({"role": "assistant", "content": reply})
-
-            def _update():
-                coach_lbl.config(text=reply, font=("Helvetica", 8), fg=COLOR_TEXT_MAIN)
-                self._is_ai_generating = False
-                self.btn_send_chat.config(state="normal")
-            self.root.after_idle(_update)
-
-        threading.Thread(target=_worker, daemon=True).start()
+        try:
+            track = self.selected_track or {}
+            self.progression_db.record_take(
+                track_title=track.get("title", "Rehearsal Track"),
+                overall_score=report.overall_score,
+                pitch_accuracy_pct=report.pitch_accuracy_pct,
+                intonation_cents=report.intonation_cents,
+                rhythm_offset_ms=report.rhythm_offset_ms,
+                breath_support_pct=report.breath_support_pct,
+                singers_formant_ratio=report.singers_formant_ratio,
+                balanced_onsets_pct=report.balanced_onsets_pct,
+                track_id=track.get("id", 0),
+                track_artist=track.get("artist", ""),
+                key_shift=self.current_key_shift
+            )
+        except Exception as e:
+            print(f"[StudioWindow] Progression recording error: {e}", file=sys.stderr)
 
     def _set_library_filter(self, filter_key: str):
         self._library_filter = filter_key
@@ -4782,7 +4517,7 @@ class StudioCockpitWindow:
 
             def _settings_download():
                 dlg.destroy()
-                self.notebook.select(self.tab_studio)
+                self._set_ai_panel_enabled(True)  # opens the AI panel, which hosts the installer
 
             tk.Button(
                 ai_card,
@@ -4935,4 +4670,6 @@ class StudioCockpitWindow:
             self.recorder.stop_recording()
         self.player.stop()
         self.recorder.stop_recording()
+        if self.ai_panel is not None:
+            self.ai_panel.suspend()  # invalidate any in-flight AI work before teardown
         self.root.destroy()

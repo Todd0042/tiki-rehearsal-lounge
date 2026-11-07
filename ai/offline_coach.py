@@ -532,6 +532,106 @@ class OfflineVocalCoach:
             return result
         return self._generate_rule_based_chat_reply(user_message, report_data, track_info, lyric_alignment)
 
+    def generate_creative_adaptation_notes(
+        self,
+        report_data: Dict[str, Any],
+        track_info: Optional[Dict[str, Any]] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Qualitative-only interpretation of how the singer adapted the song (melodic style,
+        harmonic choices, lyric/phrasing changes). Consumes already-computed partition data and
+        never produces numbers that flow back into the DSP pipeline.
+        """
+        if not self.load_engine():
+            return self._generate_rule_based_creative_notes(report_data, track_info, lyric_alignment)
+
+        track_title = track_info.get("title", "this song") if track_info else "this song"
+        lyric_line = ""
+        if lyric_alignment and lyric_alignment.get("status") in ("aligned", "transcribed_take_only"):
+            missed = lyric_alignment.get("missed_phrases") or []
+            missed_str = "; ".join(str(m) for m in missed[:4]) if missed else "none"
+            lyric_line = (
+                f"- Lyric alignment: {lyric_alignment.get('summary_text', '')}\n"
+                f"- Phrases that deviated from the written lyrics: {missed_str}\n"
+            )
+        prompt = (
+            f"<|im_start|>system\n{CHAT_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Telemetry for my take of '{track_title}' (already measured; do not restate the numbers):\n"
+            f"- Auditory Appeal: {report_data.get('auditory_appeal_score', 0)}/100 "
+            f"({report_data.get('auditory_appeal_verdict', 'n/a')})\n"
+            f"- Harmonic Consonance vs melody: {report_data.get('harmonic_consonance_pct', 0.0):.1f}%\n"
+            f"- Melodic Contour Concordance: {report_data.get('contour_similarity_pct', 0.0):.1f}% ({report_data.get('phrase_shape_verdict', 'Musical Expression')})\n"
+            f"- Style / Genre Context: {str(report_data.get('style_genre', 'pop')).title()}\n"
+            f"- Pitch Accuracy vs melody: {report_data.get('pitch_accuracy_pct', 0)}%\n"
+            f"- Vibrato style: {report_data.get('vibrato_style_verdict', 'n/a')}\n"
+            f"- Dynamic arc: {report_data.get('dynamic_arc_verdict', 'n/a')}\n"
+            f"{lyric_line}"
+            f"Reply in 3 short plain sentences: (1) whether my departures from the original melody read as "
+            f"intentional personal style or as drift, (2) how a listener would perceive the harmony/tone choices, "
+            f"(3) one creative idea to push the arrangement further (genre feel, ad-lib, or phrasing change). "
+            f"Do not give a score and do not invent facts.<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        result = self._query_completion(prompt, max_tokens=260, temperature=0.75)
+        if result:
+            return result
+        return self._generate_rule_based_creative_notes(report_data, track_info, lyric_alignment)
+
+    def _generate_rule_based_creative_notes(
+        self,
+        report: Dict[str, Any],
+        track_info: Optional[Dict[str, Any]] = None,
+        lyric_alignment: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Deterministic, telemetry-grounded creative notes used when no LLM is available."""
+        appeal = int(report.get("auditory_appeal_score", 0) or 0)
+        consonance = float(report.get("harmonic_consonance_pct", 0.0) or 0.0)
+        contour_sim = float(report.get("contour_similarity_pct", 0.0) or 0.0)
+        genre = str(report.get("style_genre", "pop")).lower()
+        pitch_acc = float(report.get("pitch_accuracy_pct", 0.0) or 0.0)
+        lines: List[str] = []
+
+        if appeal and pitch_acc < 70 and consonance >= 70:
+            if contour_sim >= 70:
+                lines.append(
+                    f"You wandered from the written notes, but your phrasing contour matched the melodic arcs ({contour_sim:.0f}% shape similarity) "
+                    f"and sat consonantly against the backing track - that reads as a deliberate {genre} interpretation rather than missed notes."
+                )
+            else:
+                lines.append(
+                    f"You wandered from the written melody, but your notes still sat consonantly against it - "
+                    f"that reads as a deliberate personal arrangement rather than missed notes."
+                )
+        elif appeal and pitch_acc >= 85:
+            lines.append(
+                "You stayed close to the original melody, so listeners will hear a faithful, polished cover."
+            )
+        elif appeal:
+            lines.append(
+                "Parts of the melody drifted into less consonant intervals; pick one or two phrases to "
+                "own as stylistic choices and lock the rest to the original line."
+            )
+        else:
+            lines.append("Not enough voiced material was detected to judge your melodic style on this take.")
+
+        if lyric_alignment and lyric_alignment.get("status") == "aligned":
+            missed = lyric_alignment.get("missed_phrases") or []
+            if missed:
+                lines.append(
+                    f"Lyric changes spotted around: {'; '.join(str(m) for m in missed[:3])}. "
+                    "If those were ad-libs, keep them rhythmically anchored to the beat."
+                )
+            else:
+                lines.append("Your lyric delivery matched the written words, leaving room to experiment with phrasing.")
+
+        lines.append(
+            f"Creative idea: try the chorus with distinct {genre} inflections - experiment with an expressive bend into key vowel onsets "
+            "or a relaxed, behind-the-beat delivery."
+        )
+        return " ".join(lines)
+
     def _build_debrief_prompt(
         self,
         report: Dict[str, Any],
@@ -583,6 +683,8 @@ class OfflineVocalCoach:
             f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
             f"- Auditory Appeal: {report.get('auditory_appeal_score', 0)}/100 ({report.get('auditory_appeal_verdict', 'Harmonically Consonant')})\n"
             f"- Harmonic Consonance: {report.get('harmonic_consonance_pct', 0.0):.1f}%\n"
+            f"- Melodic Contour Concordance: {report.get('contour_similarity_pct', 0.0):.1f}% ({report.get('phrase_shape_verdict', 'Musical Expression')})\n"
+            f"- Style / Genre Context: {str(report.get('style_genre', 'pop')).title()}\n"
             f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0)}% (within ±50¢)\n"
             f"- Intonation Bias: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
             f"- Rhythm / Onset Pocket: {report.get('rhythm_offset_ms', 0):+0.1f} ms ({report.get('rhythm_verdict', 'Locked On')})\n"
@@ -599,10 +701,10 @@ class OfflineVocalCoach:
             f"{phrase_section}\n"
             f"{prog_section}\n"
             f"{f'[PARTITION: LYRICS_ALIGNMENT]' + chr(10) + '- Status: ' + lyric_alignment.get('status', 'unavailable') + chr(10) + '- Summary: ' + lyric_alignment.get('summary_text', '') + chr(10) if lyric_alignment and lyric_alignment.get('status') == 'aligned' else ''}"
-            f"CRITICAL INSTRUCTION: The singer ALREADY sees the raw timestamped highlight list and struggle list in the UI cards directly above your text. "
+            f"CRITICAL INSTRUCTION: The singer ALREADY sees the raw timestamped highlight list and struggle list in the Raw Analysis report card beside this panel. "
             f"DO NOT duplicate or re-list them. Deliver your unique, expert vocal masterclass synthesis with:\n"
             f"1. 🔬 **Acoustic Diagnosis (The Root-Cause 'Why')**: Explain the underlying vocal fold physiology, airflow, attack scooping, and vocal tract resonance behind my take metrics.\n"
-            f"2. 🎵 **Artistic Musicality & Auditory Appeal**: Comment on how my personal styling, phrasing, and harmonic choices come across to listeners.\n"
+            f"2. 🎵 **Artistic Musicality & Auditory Appeal**: Comment on how my personal styling, melodic contour phrase shapes ({report.get('contour_similarity_pct', 0.0):.1f}% concordance), and harmonic choices come across to listeners within the {report.get('style_genre', 'pop')} genre feel.\n"
             f"3. 🎯 **Next-Take Tactical Focus**: Give me 1-2 concrete, high-leverage physical cues for my immediate next take.\n"
             f"4. 🛠️ **Micro-Drills (Somatic Exercises)**: 2 hyper-focused vocal exercises with exact syllable, starting pitch, and execution instructions.\n"
             f"<|im_end|>\n"
@@ -691,6 +793,8 @@ class OfflineVocalCoach:
                 f"- Overall Performance Score: {report.get('overall_score', 0)}/100\n"
                 f"- Auditory Appeal: {report.get('auditory_appeal_score', 0)}/100 ({report.get('auditory_appeal_verdict', 'Harmonically Consonant')})\n"
                 f"- Harmonic Consonance: {report.get('harmonic_consonance_pct', 0.0):.1f}%\n"
+                f"- Melodic Contour Concordance: {report.get('contour_similarity_pct', 0.0):.1f}% ({report.get('phrase_shape_verdict', 'Musical Expression')})\n"
+                f"- Style / Genre Context: {str(report.get('style_genre', 'pop')).title()}\n"
                 f"- Pitch Accuracy: {report.get('pitch_accuracy_pct', 0):.1f}% (within ±50¢)\n"
                 f"- Intonation Drift: {report.get('intonation_cents', 0):+0.1f}¢ ({report.get('intonation_verdict', 'Center')})\n"
                 f"- Attack Velocity & Scooping: {report.get('pitch_scoop_pct', 0)}% scooped attacks ({report.get('attack_velocity_verdict', 'Clean')})\n"
@@ -714,7 +818,7 @@ class OfflineVocalCoach:
                 f"1. When the user asks about lyrics, words, or song phrasing, ground your answer strictly in [PARTITION: LYRICS_ALIGNMENT]. Quote the exact target and sung words.\n"
                 f"2. If [PARTITION: LYRICS_ALIGNMENT] status is 'transcribed_take_only', tell the user what words were transcribed from their take and provide feedback on their phrasing.\n"
                 f"3. If [PARTITION: LYRICS_ALIGNMENT] status is 'unavailable', tell the user lyric transcription was not active for this rehearsal take, and NEVER guess lyrics from pitch or tone!\n"
-                f"4. When the user asks about styling, runs, or personal musical interpretation, explain that their Auditory Appeal score ({report.get('auditory_appeal_score', 0)}/100) measures how pleasant and consonant their choices sound to human listeners, even when deviating from the original melody!\n"
+                f"4. When the user asks about styling, runs, or personal musical interpretation, explain that their Auditory Appeal score ({report.get('auditory_appeal_score', 0)}/100) and Melodic Contour Concordance ({report.get('contour_similarity_pct', 0.0):.1f}%) measure how pleasant, consonant, and musically shaped their choices sound to human listeners, even when deviating from the original melody!\n"
             )
 
         if debrief_text:

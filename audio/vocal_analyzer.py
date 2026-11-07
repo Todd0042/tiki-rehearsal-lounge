@@ -131,6 +131,9 @@ class TakeAnalysisReport:
     auditory_appeal_score: int = 0         # 0 - 100 listener musicality & pleasingness
     auditory_appeal_verdict: str = "Harmonically Consonant"
     harmonic_consonance_pct: float = 0.0   # % interval harmony & scale agreement
+    contour_similarity_pct: float = 0.0    # % phrase rise/fall slope concordance with melody shape
+    phrase_shape_verdict: str = "Musical Expression"  # Shape & dynamic gesture verdict
+    style_genre: str = "pop"               # Evaluated genre/style context (pop, blues, country, jazz, rock)
 
     def __post_init__(self):
         if self.phrase_highlights is None:
@@ -288,6 +291,7 @@ class VocalTakeAnalyzer:
         reference_wav: Optional[Path] = None,
         playback_audio_path: Optional[Path] = None,
         key_shift: int = 0,
+        genre: str = "pop",
         progress_cb: Optional[Callable[[float, str], None]] = None
     ) -> TakeAnalysisReport:
         """
@@ -453,8 +457,8 @@ class VocalTakeAnalyzer:
         dynamic_contrast_db, dynamic_arc_verdict = self._analyze_dynamic_arc(singer_audio, sr, s_pitches, hop_ms=15.0)
         vibrato_bloom_ms, vibrato_style_verdict = self._analyze_vibrato_bloom(s_pitches, hop_ms=15.0, vib_present=vib_present)
 
-        # 10c. Auditory Appeal & Stylistic Musicality (Harmonic consonance vs melody)
-        auditory_score, auditory_verdict, harmonic_consonance = self._analyze_auditory_appeal(
+        # 10c. Auditory Appeal & Stylistic Musicality (Harmonic consonance vs melody + Melodic Contour)
+        auditory_score, auditory_verdict, harmonic_consonance, contour_similarity, phrase_shape_verdict = self._analyze_auditory_appeal(
             singer_audio=singer_audio,
             sr=sr,
             s_pitches=s_pitches,
@@ -463,9 +467,9 @@ class VocalTakeAnalyzer:
             sf_ratio=sf_ratio,
             vib_present=vib_present,
             vib_rate=vib_rate,
-            vib_depth=vib_depth
+            vib_depth=vib_depth,
+            genre=genre
         )
-
         # 11. Overall Score calculation (0 - 100)
         # 50% pitch accuracy, 15% intonation, 15% rhythm, 10% breath support, 10% balanced onsets
         intonation_penalty = min(20.0, abs(intonation))
@@ -584,7 +588,10 @@ class VocalTakeAnalyzer:
             vibrato_style_verdict=vibrato_style_verdict,
             auditory_appeal_score=auditory_score,
             auditory_appeal_verdict=auditory_verdict,
-            harmonic_consonance_pct=harmonic_consonance
+            harmonic_consonance_pct=harmonic_consonance,
+            contour_similarity_pct=contour_similarity,
+            phrase_shape_verdict=phrase_shape_verdict,
+            style_genre=genre
         )
 
     def _suppress_speaker_bleed(
@@ -717,10 +724,41 @@ class VocalTakeAnalyzer:
             s_active = s_slice[voiced_mask]
             r_active = r_slice[voiced_mask]
 
-            cents_errors = 1200.0 * np.log2(s_active / r_active)
+            s_midi_active = np.array([hz_to_midi(f) for f in s_active])
+            r_midi_active = np.array([hz_to_midi(f) for f in r_active])
 
-            # Accurate if within ±50 cents (quarter-tone)
-            accurate = np.sum(np.abs(cents_errors) <= 50.0)
+            # Measure continuous interval differences in semitones
+            raw_semi_diffs = s_midi_active - r_midi_active
+
+            # 1. Octave Invariance: Map difference modulo 12 to handle singers performing
+            # an octave lower or higher (e.g. Bass/Baritone singing a Soprano line or vice versa).
+            # Shortest circular distance to unison or any octave:
+            # e.g., diff = -12.0 -> abs_oct_diff = 0.0; diff = -11.9 -> abs_oct_diff = 0.1
+            octave_wrapped_diffs = (raw_semi_diffs + 6.0) % 12.0 - 6.0
+            cents_errors_octave = octave_wrapped_diffs * 100.0
+
+            # 2. Check for an intentional global key transposition / shift (e.g. singer modulated
+            # cleanly by N semitones across the whole take).
+            # Find the most common nearest integer semitone offset:
+            int_offsets = np.round(raw_semi_diffs).astype(int)
+            # Find median global offset
+            global_int_shift = int(np.round(np.median(raw_semi_diffs)))
+            shifted_semi_diffs = raw_semi_diffs - global_int_shift
+            cents_errors_shifted = shifted_semi_diffs * 100.0
+
+            # Determine whether direct octave-wrapped matching or globally-transposed matching is best
+            direct_oct_accurate = np.sum(np.abs(cents_errors_octave) <= 50.0)
+            shifted_accurate = np.sum(np.abs(cents_errors_shifted) <= 50.0)
+
+            if shifted_accurate > direct_oct_accurate and (shifted_accurate / len(raw_semi_diffs)) >= 0.65:
+                # Singer modulated or transposed their performance cleanly into an alternate key
+                cents_errors = cents_errors_shifted
+                accurate = shifted_accurate
+            else:
+                # Octave-invariant direct melody matching
+                cents_errors = cents_errors_octave
+                accurate = direct_oct_accurate
+
             acc_pct = float(accurate / len(cents_errors)) * 100.0
             intonation = float(np.median(cents_errors))
 
@@ -1159,6 +1197,54 @@ class VocalTakeAnalyzer:
 
         return round(mean_delay, 1), verdict
 
+    def _extract_melodic_contour(
+        self,
+        pitches: np.ndarray,
+        hop_ms: float = 15.0
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Extracts pitch delta slopes (Δf[n] = f[n] - f[n-1]) and contour gesture directions:
+        +1 = Ascending, 0 = Sustained Plateau, -1 = Descending.
+        Returns (slopes_cents_per_sec, gestures, stability_pct).
+        """
+        if len(pitches) < 2:
+            return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int8), 100.0
+
+        # Convert to continuous MIDI with zeros for unvoiced
+        midis = np.array([hz_to_midi(f) if f > 0 else 0.0 for f in pitches], dtype=np.float32)
+
+        # Apply moving median filter (k=5) over voiced segments to isolate deliberate contours from micro-jitter
+        smooth_midis = np.copy(midis)
+        for i in range(2, len(midis) - 2):
+            window = midis[i-2:i+3]
+            v_win = window[window > 0]
+            if len(v_win) >= 3:
+                smooth_midis[i] = np.median(v_win)
+
+        dt = hop_ms / 1000.0
+        # Differences in semitones divided by time in seconds -> semitones/sec
+        slopes = np.zeros(len(pitches), dtype=np.float32)
+        gestures = np.zeros(len(pitches), dtype=np.int8)
+
+        # Voiced transitions
+        for i in range(1, len(pitches)):
+            if smooth_midis[i] > 0 and smooth_midis[i-1] > 0:
+                d_semi = smooth_midis[i] - smooth_midis[i-1]
+                slope_val = d_semi / dt
+                slopes[i] = slope_val
+                # Categorize gesture: threshold at ~0.75 semitones/sec to distinguish intentional inflection
+                if slope_val > 0.75:
+                    gestures[i] = 1   # Ascending
+                elif slope_val < -0.75:
+                    gestures[i] = -1  # Descending
+                else:
+                    gestures[i] = 0   # Plateau / Sustained
+
+        v_mask = (smooth_midis[1:] > 0) & (smooth_midis[:-1] > 0)
+        v_gest = gestures[1:][v_mask]
+        plateau_pct = float(np.mean(v_gest == 0) * 100.0) if len(v_gest) > 0 else 100.0
+        return slopes, gestures, plateau_pct
+
     def _analyze_auditory_appeal(
         self,
         singer_audio: np.ndarray,
@@ -1169,28 +1255,31 @@ class VocalTakeAnalyzer:
         sf_ratio: float = 0.35,
         vib_present: bool = False,
         vib_rate: float = 0.0,
-        vib_depth: float = 0.0
-    ) -> Tuple[int, str, float]:
+        vib_depth: float = 0.0,
+        genre: str = "pop"
+    ) -> Tuple[int, str, float, float, str]:
         """
         Evaluates the performer's artistic styling, harmonic consonance, and overall auditory pleasingness.
 
-        Unlike rigid note-matching, this metric recognizes that vocal performers frequently introduce
-        stylistic interpretation, vocal runs, harmony lines (e.g. 3rds/6ths), or blues/soul inflections.
-        It measures:
-        1. Harmonic Consonance: Psychoacoustic consonance of sung notes relative to song melody/scale.
-        2. Intonation Purity: Purity and stability of pitch centering on chosen notes.
-        3. Timbral Warmth: Smooth acoustic spectral balance and singer's formant projection.
-        4. Phrasing & Vibrato Maturity: Natural expressive bloom without harshness.
+        Measures:
+        1. Genre-Aware Harmonic Consonance: Psychoacoustic consonance with genre-specific interval weightings
+           (e.g. blues bends, passing country 2nds, jazz 7ths/9ths).
+        2. Melodic Contour & Phrase Shape: Concordance of pitch direction/slope (Δf[n]) with the reference melody,
+           rewarding singers who capture the musical arc even when personalizing lyrics or harmony.
+        3. Intonation Purity: Purity and stability of pitch centering on chosen notes.
+        4. Timbral Warmth: Smooth acoustic spectral balance and singer's formant projection.
+        5. Phrasing & Vibrato Maturity: Natural expressive bloom without harshness.
         """
         s_voiced = s_pitches[s_pitches > 0]
         if len(s_voiced) < 20:
-            return 0, "No Vocal Signal Detected", 0.0
+            return 0, "No Vocal Signal Detected", 0.0, 0.0, "N/A"
 
         s_midi = np.array([hz_to_midi(f) for f in s_voiced])
+        genre_clean = (genre or "pop").strip().lower()
 
-        # 1. Harmonic Consonance Evaluation
-        # Consonance weights for interval classes (0 - 11 semitones)
-        consonance_weights = {
+        # 1. Genre-Aware Consonance Weights for Interval Classes (0 - 11 semitones)
+        # Base weights (Pop / Default)
+        base_weights = {
             0: 1.00,  # Unison / Octave
             7: 0.96,  # Perfect 5th
             5: 0.92,  # Perfect 4th
@@ -1198,12 +1287,34 @@ class VocalTakeAnalyzer:
             3: 0.88,  # Minor 3rd
             9: 0.88,  # Major 6th
             8: 0.85,  # Minor 6th
-            2: 0.78,  # Major 2nd (passing tone, soul tension)
-            10: 0.76, # Minor 7th (blues/pentatonic inflection)
-            11: 0.62, # Major 7th (leading tone)
+            2: 0.78,  # Major 2nd
+            10: 0.76, # Minor 7th
+            11: 0.62, # Major 7th
             6: 0.40,  # Tritone
-            1: 0.30   # Minor 2nd (dissonant clash)
+            1: 0.30   # Minor 2nd
         }
+
+        # Apply genre-specific modifier adjustments
+        consonance_weights = dict(base_weights)
+        if any(w in genre_clean for w in ("blues", "soul", "r&b", "rnb")):
+            consonance_weights[3] = 0.95   # Minor 3rd (blues scale heart)
+            consonance_weights[10] = 0.94  # Minor 7th (dominant/pentatonic blues)
+            consonance_weights[6] = 0.72   # Tritone / diminished 5th (the classic "blue note")
+            consonance_weights[2] = 0.84   # Soul passing 2nd
+        elif any(w in genre_clean for w in ("country", "folk", "bluegrass")):
+            consonance_weights[2] = 0.90   # Major 2nd (passing yodel / country inflection)
+            consonance_weights[4] = 0.95   # Major 3rd
+            consonance_weights[9] = 0.92   # Major 6th
+            consonance_weights[7] = 0.98   # Open 5th
+        elif any(w in genre_clean for w in ("jazz", "bossa", "swing")):
+            consonance_weights[11] = 0.88  # Major 7th (jazz color)
+            consonance_weights[10] = 0.92  # Minor 7th
+            consonance_weights[2] = 0.92   # 9th color extension
+            consonance_weights[6] = 0.76   # Tritone substitution / dim5
+        elif any(w in genre_clean for w in ("rock", "metal", "punk")):
+            consonance_weights[7] = 0.98   # Power 5th
+            consonance_weights[5] = 0.95   # 4th
+            consonance_weights[10] = 0.88  # Flat 7th rock tension
 
         has_aligned_ref = (
             ref_pitches is not None and
@@ -1211,8 +1322,11 @@ class VocalTakeAnalyzer:
             np.sum(ref_pitches > 0) >= 20
         )
 
+        contour_similarity_pct = 75.0
+        phrase_shape_verdict = "Expressive Natural Shape"
+
         if has_aligned_ref:
-            # Compare singer pitch to reference melody per timestamp
+            # A. Harmonic Consonance per frame
             both_voiced_mask = (s_pitches > 0) & (ref_pitches > 0)
             if np.sum(both_voiced_mask) >= 20:
                 s_both = np.array([hz_to_midi(f) for f in s_pitches[both_voiced_mask]])
@@ -1226,9 +1340,32 @@ class VocalTakeAnalyzer:
                 for ic, err in zip(interval_classes, cents_errors):
                     weight = consonance_weights.get(ic, 0.60)
                     fine_purity = max(0.0, 1.0 - (err / 50.0) ** 1.3)
-                    # Even when diverging from melody, singing a consonant harmony (3rd, 5th, etc.) in tune scores high
                     frame_scores.append(weight * (0.60 + 0.40 * fine_purity) * 100.0)
                 harmonic_consonance_pct = float(np.mean(frame_scores))
+
+                # B. Melodic Contour & Phrase-Shape Tracking
+                # Compare directional changes (rise/fall/hold) between singer and reference
+                _, s_gest, _ = self._extract_melodic_contour(s_pitches, hop_ms=hop_ms)
+                _, r_gest, _ = self._extract_melodic_contour(ref_pitches, hop_ms=hop_ms)
+
+                contour_eval_mask = both_voiced_mask[1:] & both_voiced_mask[:-1]
+                if np.sum(contour_eval_mask) >= 20:
+                    sg_eval = s_gest[1:][contour_eval_mask]
+                    rg_eval = r_gest[1:][contour_eval_mask]
+
+                    # Directional agreement: matching slopes (+1 and +1, -1 and -1, or 0 and 0)
+                    exact_gesture_matches = np.sum(sg_eval == rg_eval)
+                    # Partial agreement: non-contradictory (one held plateau while other stepped slightly)
+                    neutral_matches = np.sum((sg_eval != rg_eval) & ((sg_eval == 0) | (rg_eval == 0)))
+                    concordance = (exact_gesture_matches * 1.0 + neutral_matches * 0.50) / len(sg_eval)
+                    contour_similarity_pct = float(np.clip(concordance * 100.0, 35.0, 100.0))
+
+                    if contour_similarity_pct >= 82.0:
+                        phrase_shape_verdict = "Dynamic Contour Mirroring"
+                    elif contour_similarity_pct >= 68.0:
+                        phrase_shape_verdict = "Organic Melodic Flow"
+                    else:
+                        phrase_shape_verdict = "Creative Counter-Phrasing"
             else:
                 has_aligned_ref = False
 
@@ -1245,11 +1382,16 @@ class VocalTakeAnalyzer:
             scale_scores = np.array([consonance_weights.get(ic, 0.70) * 100.0 for ic in intervals_from_tonic])
             harmonic_consonance_pct = float(0.50 * np.mean(purity_scores) + 0.50 * np.mean(scale_scores))
 
+            # Internal contour stability without reference
+            _, s_gest, plateau_pct = self._extract_melodic_contour(s_pitches, hop_ms=hop_ms)
+            contour_similarity_pct = float(np.clip(plateau_pct * 0.40 + 50.0, 50.0, 95.0))
+            phrase_shape_verdict = "Natural Phrasing Arcs"
+
         # 2. Intonation Purity on Chosen Target Notes
         cents_offsets = np.abs(s_midi - np.round(s_midi)) * 100.0
         intonation_purity = float(np.mean(np.maximum(0.0, 100.0 - cents_offsets * 2.2)))
 
-        # 3. Timbral Warmth & Resonance Euphony (Singer's Formant + absence of distortion)
+        # 3. Timbral Warmth & Resonance Euphony (Singer's Formant)
         timbre_warmth = min(100.0, max(45.0, (sf_ratio / 0.38) * 85.0))
 
         # 4. Phrasing Flow & Vibrato Maturity
@@ -1261,12 +1403,13 @@ class VocalTakeAnalyzer:
         else:
             vib_flow = 76.0  # Controlled straight tone
 
-        # Composite Auditory Pleasingness (0 - 100)
+        # Composite Auditory Pleasingness with Contour & Genre weighting
         composite = (
-            (harmonic_consonance_pct * 0.45) +
-            (intonation_purity * 0.25) +
-            (timbre_warmth * 0.15) +
-            (vib_flow * 0.15)
+            (harmonic_consonance_pct * 0.35) +
+            (contour_similarity_pct * 0.25) +
+            (intonation_purity * 0.20) +
+            (timbre_warmth * 0.10) +
+            (vib_flow * 0.10)
         )
         score = int(round(max(10.0, min(100.0, composite))))
 
@@ -1281,7 +1424,7 @@ class VocalTakeAnalyzer:
         else:
             verdict = "Tonal Tension / Inharmonic"
 
-        return score, verdict, round(harmonic_consonance_pct, 1)
+        return score, verdict, round(harmonic_consonance_pct, 1), round(contour_similarity_pct, 1), phrase_shape_verdict
 
     def _analyze_resonance(
         self,

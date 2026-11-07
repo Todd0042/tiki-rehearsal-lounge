@@ -217,5 +217,40 @@ class TestOfflineCoach(unittest.TestCase):
         self.coach.shutdown_engine()
 
 
+class TestCreativeAdaptationNotes(unittest.TestCase):
+    """Creative notes are AI-panel-only, qualitative, and must work without any LLM."""
+
+    def setUp(self):
+        self.coach = OfflineVocalCoach()
+
+    def test_rule_based_notes_recognise_intentional_style(self):
+        report = {"auditory_appeal_score": 80, "harmonic_consonance_pct": 82.0, "pitch_accuracy_pct": 55.0}
+        text = self.coach._generate_rule_based_creative_notes(report)
+        self.assertIn("personal arrangement", text)
+
+    def test_rule_based_notes_recognise_contour_and_genre(self):
+        report = {
+            "auditory_appeal_score": 85,
+            "harmonic_consonance_pct": 86.0,
+            "contour_similarity_pct": 88.0,
+            "phrase_shape_verdict": "Dynamic Contour Mirroring",
+            "style_genre": "blues",
+            "pitch_accuracy_pct": 60.0
+        }
+        text = self.coach._generate_rule_based_creative_notes(report)
+        self.assertIn("phrasing contour matched the melodic arcs", text)
+        self.assertIn("blues interpretation", text)
+
+    def test_rule_based_notes_mention_lyric_changes(self):
+        report = {"auditory_appeal_score": 70, "harmonic_consonance_pct": 70.0, "pitch_accuracy_pct": 90.0}
+        lyric = {"status": "aligned", "missed_phrases": ["and I will always love you"]}
+        text = self.coach._generate_rule_based_creative_notes(report, None, lyric)
+        self.assertIn("always love you", text)
+
+    def test_rule_based_notes_handle_empty_report(self):
+        text = self.coach._generate_rule_based_creative_notes({})
+        self.assertIn("Not enough voiced material", text)
+
+
 if __name__ == "__main__":
     unittest.main()
