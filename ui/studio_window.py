@@ -196,6 +196,51 @@ class StudioCockpitWindow:
         # Dock the optional AI side panel only if configured / a model is installed
         self.root.after(220, self._apply_ai_panel_state)
 
+        # Natural mouse wheel scrolling over any fields, cards, or child widgets
+        self._setup_global_mousewheel()
+
+    def _setup_global_mousewheel(self):
+        """
+        Enables natural, seamless mouse wheel scrolling over any scrollable view
+        or any of its child fields, cards, and labels without requiring the user
+        to position their mouse directly over a scrollbar.
+        """
+        def _on_global_mousewheel(event):
+            # Determine scroll direction (-2 units for up, +2 units for down)
+            if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
+                direction = -2
+            elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
+                direction = 2
+            else:
+                return
+
+            widget_under_pointer = None
+            try:
+                widget_under_pointer = self.root.winfo_containing(event.x_root, event.y_root)
+            except Exception:
+                pass
+
+            curr = widget_under_pointer or getattr(event, "widget", None)
+            while curr:
+                # Text or Treeview widgets with their own internal scrolling
+                if isinstance(curr, tk.Text) or isinstance(curr, ttk.Treeview):
+                    try:
+                        curr.yview_scroll(direction, "units")
+                        return "break"
+                    except Exception:
+                        pass
+                # Scrollable canvas containers (Report Card, Calibration view, AI Panel)
+                elif isinstance(curr, tk.Canvas) and getattr(curr, "_scrollable", False):
+                    try:
+                        curr.yview_scroll(direction, "units")
+                        return "break"
+                    except Exception:
+                        pass
+                curr = getattr(curr, "master", None)
+
+        for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+            self.root.bind_all(seq, _on_global_mousewheel, add=True)
+
     def dispatch_to_main(self, fn: Callable[[], None]):
         """Thread-safe dispatcher for executing UI updates on the Tkinter main thread."""
         self._ui_queue.put(fn)
@@ -686,6 +731,7 @@ class StudioCockpitWindow:
     def _build_report_card_view(self, parent: tk.LabelFrame):
         # Responsive Scrollable Canvas Container
         self.report_canvas = tk.Canvas(parent, bg=COLOR_BG_CARD, bd=0, highlightthickness=0)
+        self.report_canvas._scrollable = True
         self.report_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.report_canvas.yview)
         scroll_content = tk.Frame(self.report_canvas, bg=COLOR_BG_CARD)
 
@@ -700,17 +746,6 @@ class StudioCockpitWindow:
 
         self.report_canvas.bind("<Configure>", _on_canvas_configure)
         self.report_canvas.configure(yscrollcommand=self.report_scrollbar.set)
-
-        def _on_mousewheel(event):
-            if not hasattr(self, "report_canvas") or not self.report_canvas.winfo_exists():
-                return
-            if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
-                self.report_canvas.yview_scroll(-2, "units")
-            elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
-                self.report_canvas.yview_scroll(2, "units")
-
-        self.report_canvas.bind("<Enter>", lambda e: self.report_canvas.bind_all("<Button-4>", _on_mousewheel) or self.report_canvas.bind_all("<Button-5>", _on_mousewheel) or self.report_canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        self.report_canvas.bind("<Leave>", lambda e: self.report_canvas.unbind_all("<Button-4>") or self.report_canvas.unbind_all("<Button-5>") or self.report_canvas.unbind_all("<MouseWheel>"))
 
         self.report_canvas.pack(side="left", fill="both", expand=True)
         self.report_scrollbar.pack(side="right", fill="y")
@@ -1183,6 +1218,7 @@ class StudioCockpitWindow:
     # -------------------------------------------------------------
     def _build_calibration_tab(self, parent: tk.Frame):
         self.calib_canvas = tk.Canvas(parent, bg=COLOR_BG_MAIN, bd=0, highlightthickness=0)
+        self.calib_canvas._scrollable = True
         self.calib_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.calib_canvas.yview, style="Vertical.TScrollbar")
         container = tk.Frame(self.calib_canvas, bg=COLOR_BG_MAIN, padx=20, pady=16)
 
@@ -1206,17 +1242,6 @@ class StudioCockpitWindow:
         container.bind("<Configure>", _on_calib_content_configure)
         self.calib_canvas.bind("<Configure>", _on_calib_canvas_configure)
         self.calib_canvas.configure(yscrollcommand=self.calib_scrollbar.set)
-
-        def _on_calib_mousewheel(event):
-            if not hasattr(self, "calib_canvas") or not self.calib_canvas.winfo_exists():
-                return
-            if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
-                self.calib_canvas.yview_scroll(-2, "units")
-            elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
-                self.calib_canvas.yview_scroll(2, "units")
-
-        self.calib_canvas.bind("<Enter>", lambda e: self.calib_canvas.bind_all("<Button-4>", _on_calib_mousewheel) or self.calib_canvas.bind_all("<Button-5>", _on_calib_mousewheel) or self.calib_canvas.bind_all("<MouseWheel>", _on_calib_mousewheel))
-        self.calib_canvas.bind("<Leave>", lambda e: self.calib_canvas.unbind_all("<Button-4>") or self.calib_canvas.unbind_all("<Button-5>") or self.calib_canvas.unbind_all("<MouseWheel>"))
 
         self.calib_canvas.pack(side="left", fill="both", expand=True)
         self.calib_scrollbar.pack(side="right", fill="y")

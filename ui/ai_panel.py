@@ -280,22 +280,21 @@ class AIStudioPanel(tk.Frame):
                 pass
 
     def _bind_mousewheel(self):
+        self.canvas._scrollable = True
+
         def _wheel(event):
-            if event.num == 4 or getattr(event, "delta", 0) > 0:
-                self.canvas.yview_scroll(-2, "units")
-            elif event.num == 5 or getattr(event, "delta", 0) < 0:
-                self.canvas.yview_scroll(2, "units")
+            curr = getattr(event, "widget", None)
+            while curr:
+                if curr == self.canvas:
+                    if event.num == 4 or getattr(event, "delta", 0) > 0:
+                        self.canvas.yview_scroll(-2, "units")
+                    elif event.num == 5 or getattr(event, "delta", 0) < 0:
+                        self.canvas.yview_scroll(2, "units")
+                    return "break"
+                curr = getattr(curr, "master", None)
 
-        def _enter(_e):
-            for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
-                self.canvas.bind_all(seq, _wheel)
-
-        def _leave(_e):
-            for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
-                self.canvas.unbind_all(seq)
-
-        self.canvas.bind("<Enter>", _enter)
-        self.canvas.bind("<Leave>", _leave)
+        for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+            self.canvas.bind_all(seq, _wheel, add=True)
 
     def _wrapped_label(self, parent: tk.Misc, **kw) -> tk.Label:
         lbl = tk.Label(parent, wraplength=self._wrap, justify="left", anchor="w", **kw)
