@@ -11,6 +11,13 @@ Partitions:
 3. phrase_timeline.json          -> Timestamped highlights and struggles
 4. lyrics_alignment.json         -> Ground-truth lyrics vs singer phrasing
 5. vocal_health_diagnostics.json -> Root-cause diagnosis & 30s micro-drills
+6. summary.json                   -> Compact one-way rollup (scores, top phrases, lyrics,
+                                     profile + progression snapshots). Written last; it is the
+                                     read-only input of the optional AI side panel.
+
+Data flow is strictly one-way: Python DSP -> partitions -> (optional) AI panel. AI output is
+stored beside the partitions (coach_debrief.txt, ai_creative_notes.txt) and is never fed back
+into the numeric partitions.
 """
 
 from __future__ import annotations
@@ -26,6 +33,8 @@ from config import TAKES_DIR
 from audio.vocal_analyzer import TakeAnalysisReport
 from audio.lyric_manager import LyricAlignmentReport
 
+SUMMARY_PARTITION_FILE = "summary.json"
+
 
 def sanitize_filename(name: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|]', "", name)
@@ -38,11 +47,18 @@ def save_take_partitions(
     lyric_report: Optional[LyricAlignmentReport] = None,
     track_info: Optional[Dict[str, Any]] = None,
     take_wav: Optional[Path] = None,
-    dest_base_dir: Optional[Path] = None
+    dest_base_dir: Optional[Path] = None,
+    vocal_profile: Optional[Dict[str, Any]] = None,
+    progression: Optional[Dict[str, Any]] = None
 ) -> Path:
     """
     Saves a completed rehearsal take into a structured directory with partitioned JSON files
     and a master toc.json manifest.
+
+    The pure-Python DSP pipeline is the only writer of these partitions. The optional AI side
+    panel is a read-only consumer: it reads `summary.json` (plus the other partitions) and never
+    writes numeric results back into them. `vocal_profile` and `progression` are snapshots taken
+    by the core pipeline at analysis time so the AI never has to reach into the live app state.
     """
     base_dir = dest_base_dir or TAKES_DIR
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +124,10 @@ def save_take_partitions(
         "intonation_bias": getattr(report, "intonation_bias", {}),
         "auditory_appeal_score": getattr(report, "auditory_appeal_score", 0),
         "auditory_appeal_verdict": getattr(report, "auditory_appeal_verdict", "Harmonically Consonant"),
-        "harmonic_consonance_pct": getattr(report, "harmonic_consonance_pct", 0.0)
+        "harmonic_consonance_pct": getattr(report, "harmonic_consonance_pct", 0.0),
+        "contour_similarity_pct": getattr(report, "contour_similarity_pct", 0.0),
+        "phrase_shape_verdict": getattr(report, "phrase_shape_verdict", "Musical Expression"),
+        "style_genre": getattr(report, "style_genre", "pop")
     }
     with open(take_dir / "acoustic_core.json", "w", encoding="utf-8") as f:
         json.dump(acoustic_core, f, indent=2, ensure_ascii=False)
@@ -223,13 +242,75 @@ def save_take_partitions(
                 "file": "vocal_health_diagnostics.json",
                 "status": "ready",
                 "summary": f"Fatigue: {diagnostics['fatigue_risk_verdict']} | Drill: {diagnostics['recommended_micro_drill']}"
+            },
+            "summary": {
+                "file": SUMMARY_PARTITION_FILE,
+                "status": "ready",
+                "summary": "Compact one-way rollup for the optional AI side panel"
             }
         }
     }
     with open(take_dir / "toc.json", "w", encoding="utf-8") as f:
         json.dump(toc, f, indent=2, ensure_ascii=False)
 
+    # 7. Partition: summary.json (written LAST -> its presence means the take is fully persisted)
+    top_highlights = [
+        {k: h.get(k) for k in ("timestamp", "note_span", "detail")}
+        for h in (report.phrase_highlights or [])[:3]
+    ]
+    top_struggles = [
+        {k: s.get(k) for k in ("timestamp", "note_span", "detail", "cue")}
+        for s in (report.phrase_struggles or [])[:3]
+    ]
+    summary = {
+        "schema_version": 1,
+        "take_id": take_id,
+        "created_at": now.isoformat(),
+        "track": toc["track"],
+        "scores": {
+            "overall_score": report.overall_score,
+            "auditory_appeal_score": getattr(report, "auditory_appeal_score", 0),
+            "auditory_appeal_verdict": getattr(report, "auditory_appeal_verdict", ""),
+            "harmonic_consonance_pct": getattr(report, "harmonic_consonance_pct", 0.0),
+            "contour_similarity_pct": getattr(report, "contour_similarity_pct", 0.0),
+            "phrase_shape_verdict": getattr(report, "phrase_shape_verdict", "Musical Expression"),
+            "style_genre": getattr(report, "style_genre", "pop"),
+        },
+        "key_metrics": {
+            "pitch_accuracy_pct": report.pitch_accuracy_pct,
+            "intonation_cents": report.intonation_cents,
+            "rhythm_offset_ms": report.rhythm_offset_ms,
+            "breath_support_pct": report.breath_support_pct,
+            "singers_formant_ratio": report.singers_formant_ratio,
+            "vibrato_present": report.vibrato_present,
+            "take_min_note": report.take_min_note,
+            "take_max_note": report.take_max_note,
+            "current_key_shift": report.current_key_shift,
+            "recommended_key_shift": report.recommended_key_shift,
+        },
+        "phrase_highlights": top_highlights,
+        "phrase_struggles": top_struggles,
+        "lyrics": {
+            "status": lyric_status,
+            "word_accuracy_pct": lyrics_data.get("word_accuracy_pct", 0.0),
+            "word_error_rate_pct": lyrics_data.get("word_error_rate_pct", 0.0),
+            "timing_offset_ms": lyrics_data.get("timing_offset_ms", 0.0),
+            "missed_phrases": (lyrics_data.get("missed_phrases") or [])[:5],
+            "summary_text": lyrics_data.get("summary_text", ""),
+        },
+        "health": {
+            "fatigue_risk_verdict": diagnostics["fatigue_risk_verdict"],
+            "recommended_micro_drill": diagnostics["recommended_micro_drill"],
+            "take_2_directive": diagnostics["take_2_directive"],
+        },
+        "vocal_profile": vocal_profile or None,
+        "progression": progression or None,
+    }
+    with open(take_dir / SUMMARY_PARTITION_FILE, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False, default=str)
+
     return take_dir
+
 
 
 def load_take_toc(take_dir: Path) -> Optional[Dict[str, Any]]:
@@ -255,6 +336,11 @@ def load_take_partition(take_dir: Path, partition_name: str) -> Optional[Dict[st
             return json.load(f)
     except Exception:
         return None
+
+
+def load_take_summary(take_dir: Path) -> Optional[Dict[str, Any]]:
+    """Loads summary.json (the AI panel's read-only input). Returns None for legacy takes."""
+    return load_take_partition(take_dir, SUMMARY_PARTITION_FILE)
 
 
 def get_most_recent_take_dir(base_dir: Optional[Path] = None) -> Optional[Path]:
@@ -344,7 +430,10 @@ def load_take_report_and_lyrics(
         intonation_bias=core.get("intonation_bias", {}),
         auditory_appeal_score=core.get("auditory_appeal_score", 0),
         auditory_appeal_verdict=core.get("auditory_appeal_verdict", "Harmonically Consonant"),
-        harmonic_consonance_pct=core.get("harmonic_consonance_pct", 0.0)
+        harmonic_consonance_pct=core.get("harmonic_consonance_pct", 0.0),
+        contour_similarity_pct=core.get("contour_similarity_pct", 0.0),
+        phrase_shape_verdict=core.get("phrase_shape_verdict", "Musical Expression"),
+        style_genre=core.get("style_genre", "pop")
     )
 
     lyric_alignment = LyricAlignmentReport(

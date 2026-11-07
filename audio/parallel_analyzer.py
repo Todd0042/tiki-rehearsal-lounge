@@ -375,6 +375,7 @@ class ParallelVocalTakeAnalyzer:
         reference_wav: Optional[Path] = None,
         playback_audio_path: Optional[Path] = None,
         key_shift: int = 0,
+        genre: str = "pop",
         lyric_track: Optional[LyricTrack] = None,
         progress_cb: Optional[Callable[[float, str], None]] = None
     ) -> Tuple[TakeAnalysisReport, LyricAlignmentReport]:
@@ -418,6 +419,7 @@ class ParallelVocalTakeAnalyzer:
                 if is_bleed else "No sustained vocal audio was detected in this take."
             )
             empty_report = TakeAnalysisReport(
+                style_genre=genre,
                 pitch_accuracy_pct=0.0,
                 intonation_cents=0.0,
                 intonation_verdict=verdict,
@@ -622,7 +624,7 @@ class ParallelVocalTakeAnalyzer:
         })
 
         # Auditory Pleasingness & Artistic Musicality (Harmonic Consonance vs melody)
-        auditory_score, auditory_verdict, harmonic_consonance = self.analyzer._analyze_auditory_appeal(
+        auditory_score, auditory_verdict, harmonic_consonance, contour_similarity, phrase_shape_verdict = self.analyzer._analyze_auditory_appeal(
             singer_audio=singer_audio,
             sr=sr,
             s_pitches=s_pitches,
@@ -631,7 +633,8 @@ class ParallelVocalTakeAnalyzer:
             sf_ratio=sf_ratio,
             vib_present=vib_present,
             vib_rate=vib_rate,
-            vib_depth=vib_depth
+            vib_depth=vib_depth,
+            genre=genre
         )
 
         # Calculate Overall Score (0 - 100)
@@ -729,7 +732,10 @@ class ParallelVocalTakeAnalyzer:
             intonation_bias=intonation_bias,
             auditory_appeal_score=auditory_score,
             auditory_appeal_verdict=auditory_verdict,
-            harmonic_consonance_pct=harmonic_consonance
+            harmonic_consonance_pct=harmonic_consonance,
+            contour_similarity_pct=contour_similarity,
+            phrase_shape_verdict=phrase_shape_verdict,
+            style_genre=genre
         )
 
         return report, lyric_alignment

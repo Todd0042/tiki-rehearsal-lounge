@@ -218,3 +218,47 @@ COLOR_GOLD = "#ffd700"           # Golden Sunset
 COLOR_TEXT_MAIN = "#ffffff"      # High-contrast White
 COLOR_TEXT_MUTED = "#a098b5"     # Muted Violet Grey
 COLOR_DANGER = "#ff3344"         # Error / Stop Red
+
+# ---------------------------------------------------------------------------
+# Window Geometry & Optional AI Side Panel (Maestro Tiki AI Studio)
+# ---------------------------------------------------------------------------
+# The core studio always starts compact. When the AI panel is active the window
+# grows by exactly AI_PANEL_WIDTH pixels (1180 -> 1560) and the panel is docked
+# on the right-hand side; when inactive the panel does not exist at all.
+UI_COMPACT_SIZE = (1180, 780)
+UI_AI_EXPANDED_SIZE = (1560, 780)
+AI_PANEL_WIDTH = UI_AI_EXPANDED_SIZE[0] - UI_COMPACT_SIZE[0]
+
+# config.json key controlling the panel:
+#   absent / null -> "auto": panel is shown only when an offline AI model is installed
+#   true          -> panel is shown (and offers the model installer when none is installed)
+#   false         -> panel is hidden, even when a model is installed
+AI_PANEL_CONFIG_KEY = "ai_panel_enabled"
+
+
+def get_ai_panel_preference(cfg: Optional[Dict[str, Any]] = None) -> Optional[bool]:
+    """Returns the saved tri-state AI panel preference (True / False / None for auto)."""
+    data = cfg if cfg is not None else load_studio_config()
+    value = data.get(AI_PANEL_CONFIG_KEY)
+    return value if isinstance(value, bool) else None
+
+
+def set_ai_panel_preference(value: Optional[bool]) -> bool:
+    """Persists the AI panel preference. Passing None restores 'auto' detection."""
+    cfg = load_studio_config()
+    if value is None:
+        cfg.pop(AI_PANEL_CONFIG_KEY, None)
+    else:
+        cfg[AI_PANEL_CONFIG_KEY] = bool(value)
+    return save_studio_config(cfg)
+
+
+def resolve_ai_panel_active(model_installed: bool, cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Decides whether the AI side panel should be docked.
+    Explicit preference always wins; in 'auto' mode the panel follows model availability.
+    """
+    pref = get_ai_panel_preference(cfg)
+    if pref is not None:
+        return pref
+    return bool(model_installed)
