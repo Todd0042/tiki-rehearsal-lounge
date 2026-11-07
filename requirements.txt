@@ -4,7 +4,7 @@ numpy==2.2.6; python_version < '3.12'
 scipy==1.18.1; python_version >= '3.12'
 scipy==1.15.3; python_version < '3.12'
 pillow==13.0.0; python_version >= '3.11'
-pillow==11.3.0; python_version < '3.11'
+pillow==12.3.0; python_version < '3.11'
 
 # Optional Python Audio Device Wrapper & CFFI Bridge (app includes zero-dependency ffmpeg/pw-record fallback)
 sounddevice==0.5.6
