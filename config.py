@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 # Studio Version
-STUDIO_VERSION = "1.0.7"
+STUDIO_VERSION = "1.0.8"
 
 # User Data Directories
 HOME_DIR = Path.home()
